@@ -1,3 +1,5 @@
+import os
+
 import hydra
 import lightning.pytorch as pl
 import torch
@@ -24,8 +26,11 @@ def main(cfg: HParams) -> None:
 
     wandb_logger = WandbLogger(project=cfg.wandb.project, name=cfg.wandb.name)
 
+    # relative "checkpoints" would land under $SLURM_SUBMIT_DIR ($HOME on Jean Zay --
+    # small quota); default to $WORK there, fall back to a local relative dir otherwise.
+    checkpoint_dir = os.path.join(os.environ["WORK"], "pdspeech_ssl_checkpoints") if "WORK" in os.environ else "checkpoints"
     checkpoint_cb = ModelCheckpoint(
-        dirpath="checkpoints",
+        dirpath=checkpoint_dir,
         # NOTE: metric names containing "/" can't be used inside the filename
         # template itself (ModelCheckpoint doesn't escape it, so "Val/foo" is
         # read as a subdirectory) -- "bal_acc" here is a plain manually-logged
