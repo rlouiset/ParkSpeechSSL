@@ -57,7 +57,7 @@ class AugmentHParams:
 
 @dataclass
 class DataHParams:
-    derivatives_root: str = "/lustre/fsstor/projects/rech/haj/uik24xv/ParkSSLSpeechData"
+    derivatives_root: str = "/lustre/fswork/projects/rech/haj/uik24xv/ParkSSLSpeechData"
     sample_rate: int = 16000
     # fraction of HC/PD individuals assigned to val; MSA/PSP/DYS individuals always go to train
     val_fraction: float = 0.25
