@@ -60,7 +60,7 @@ class DataHParams:
     derivatives_root: str = "/lustre/fswork/projects/rech/haj/uik24xv/ParkSSLSpeechData"
     sample_rate: int = 16000
     # fraction of HC/PD individuals assigned to val; MSA/PSP/DYS individuals always go to train
-    val_fraction: float = 0.25
+    val_fraction: float = 0.2
     split_seed: int = 42
     max_audio_seconds: float = 10.0  # hard cap: waveforms are truncated to this length in load_waveform
     num_workers: int = 8
@@ -77,7 +77,10 @@ class TrainingHParams:
     batch_size_per_gpu: int = 16  # number of INDIVIDUALS per GPU per step (=> 2x that many views)
     lr: float = 1e-4
     weight_decay: float = 1e-2
-    warmup_steps: int = 500
+    # ~370 train individuals / 4 GPUs / batch_size_per_gpu=16 => only ~5-6 optimizer
+    # steps/epoch; 500 would take ~100 epochs just to finish warmup, so scale it down
+    # to match this dataset's step-count regime (~20 epochs of warmup instead).
+    warmup_steps: int = 100
     max_epochs: int = 200
     limit_train_batches: float = 1.0  # fraction (0-1) or absolute count of batches; useful for smoke tests
     limit_val_batches: float = 1.0
@@ -85,7 +88,11 @@ class TrainingHParams:
     devices: int = 4
     accelerator: str = "gpu"
     strategy: str = "ddp"
-    accumulate_grad_batches: int = 4  # keeps effective batch size (16*4=64/gpu) equal to the pre-OOM batch_size_per_gpu=64
+    # after max_audio_seconds dropped to 10s (~4x less attention memory on top of the
+    # batch_size_per_gpu 64->16 cut), there's headroom again -- accumulate_grad_batches=4
+    # on top of only ~5-6 micro-batches/epoch/GPU was leaving just ~1 real optimizer step
+    # per epoch, which is why the loss/probe were flat (still deep in warmup after 48 epochs).
+    accumulate_grad_batches: int = 1
     gradient_clip_val: float = 1.0
     # how often (in epochs) to run the HC/PD linear probe during validation
     probe_every_n_epochs: int = 1
