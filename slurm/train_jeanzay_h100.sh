@@ -21,6 +21,7 @@ conda activate py39  # must have: torch, torchaudio, lightning, wandb, transform
                      # peft, soundfile, scikit-learn, hydra-core, omegaconf installed
 
 export WANDB_MODE=offline
+export HF_HOME=$WORK/hf_cache  # must match the HF_HOME used to pre-download the checkpoint on the login node
 export HF_HUB_OFFLINE=1  # set to 0 for the very first run so wav2vec2-xlsr-53 can download;
                           # once cached in $HF_HOME, flip back to 1 for offline compute nodes
 
