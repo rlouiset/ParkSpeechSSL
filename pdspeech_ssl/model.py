@@ -29,6 +29,7 @@ class TemporalTransformerEncoder(nn.Module):
     def __init__(self, input_dim, d_model=128, n_heads=1, num_layers=2, dropout=0.1):
         super().__init__()
         self.input_proj = nn.Linear(input_dim, d_model)
+        self.pos_encoding = PositionalEncoding(d_model)
         self.dropout = nn.Dropout(dropout)
 
         # Learnable [CLS] token (1, 1, d_model)
@@ -59,6 +60,7 @@ class TemporalTransformerEncoder(nn.Module):
 
         # Project to d_model
         x = self.input_proj(x)
+        x = self.pos_encoding(x)
         x = self.dropout(x)
 
         # Add [CLS] token at the beginning

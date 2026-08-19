@@ -29,7 +29,7 @@ class ModelHParams:
     d_blstm: int = 128  # kept this name to mirror HDSNetModelHParams; feeds d_model of the temporal transformer
     d_emb: int = 32
     dropout: float = 0.2
-    n_att: int = 1  # number of attention heads
+    n_att: int = 2  # number of attention heads (d_blstm=128 divisible by 2)
     proj_head_dim: int = 32  # SimCLR-style projection head output dim (contrastive loss only, not the linear probe)
 
 

@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import torch
+import torch.nn as nn
 import lightning.pytorch as pl
 
 from pdspeech_ssl.config import HParams
 from pdspeech_ssl.data import PairBatch, SegmentBatch
 from pdspeech_ssl.linear_probe import train_and_eval_linear_probe
-from pdspeech_ssl.losses import nt_xent_loss
 from pdspeech_ssl.model import SSLEncoder
 
 LABEL_TO_BINARY = {"HC": 0, "PD": 1}
+
+
+def _hc_vs_rest_targets(labels: list, device: torch.device) -> torch.Tensor:
+    """0.0 for HC, 1.0 for everything else (PD/MSA/PSP/DYS) -- a reachability
+    sanity check for whether the encoder can learn anything at all before
+    going back to the harder SSL contrastive objective."""
+    return torch.tensor([0.0 if label == "HC" else 1.0 for label in labels], device=device)
 
 
 class SSLLightningModule(pl.LightningModule):
@@ -17,35 +24,29 @@ class SSLLightningModule(pl.LightningModule):
         super().__init__()
         self.cfg = cfg
         self.model = SSLEncoder(cfg.encoder, cfg.model)
+        self.cls_head = nn.Linear(cfg.model.d_emb, 1)
+        self.bce = nn.BCEWithLogitsLoss()
 
-    def _step_embeddings(self, batch: PairBatch) -> tuple[torch.Tensor, torch.Tensor]:
-        out1 = self.model(batch["view1"], batch["len1"], augment_cfg=self.cfg.augment)
-        out2 = self.model(batch["view2"], batch["len2"], augment_cfg=self.cfg.augment)
-        return out1["proj"], out2["proj"]
-
-    def _contrastive_loss(self, z1: torch.Tensor, z2: torch.Tensor) -> torch.Tensor:
-        if self.cfg.loss.gather_across_gpus and self.trainer.world_size > 1:
-            # sync_grads=True: gradients flow back through the gather to every
-            # rank's own local forward pass, so this is a true global negative pool,
-            # not a detached copy of the other ranks' embeddings.
-            z1 = self.all_gather(z1, sync_grads=True).flatten(0, 1)
-            z2 = self.all_gather(z2, sync_grads=True).flatten(0, 1)
-        return nt_xent_loss(z1, z2, self.cfg.loss.temperature)
+    def _classification_loss(self, batch: PairBatch) -> torch.Tensor:
+        embd1 = self.model(batch["view1"], batch["len1"], augment_cfg=self.cfg.augment)["embd"]
+        embd2 = self.model(batch["view2"], batch["len2"], augment_cfg=self.cfg.augment)["embd"]
+        targets = _hc_vs_rest_targets(batch["labels"], self.device)
+        logit1 = self.cls_head(embd1).squeeze(-1)
+        logit2 = self.cls_head(embd2).squeeze(-1)
+        return 0.5 * (self.bce(logit1, targets) + self.bce(logit2, targets))
 
     def training_step(self, batch: PairBatch, batch_idx: int) -> torch.Tensor:
-        z1, z2 = self._step_embeddings(batch)
-        loss = self._contrastive_loss(z1, z2)
+        loss = self._classification_loss(batch)
         self.log(
-            "Train/contrastive_loss", loss, on_step=True, on_epoch=True,
+            "Train/hc_vs_rest_bce", loss, on_step=True, on_epoch=True,
             sync_dist=True, batch_size=batch["view1"].shape[0], prog_bar=True,
         )
         return loss
 
     def validation_step(self, batch: PairBatch, batch_idx: int) -> None:
-        z1, z2 = self._step_embeddings(batch)
-        loss = self._contrastive_loss(z1, z2)
+        loss = self._classification_loss(batch)
         self.log(
-            "Val/contrastive_loss", loss, on_step=False, on_epoch=True,
+            "Val/hc_vs_rest_bce", loss, on_step=False, on_epoch=True,
             sync_dist=True, batch_size=batch["view1"].shape[0],
         )
 
@@ -97,7 +98,7 @@ class SSLLightningModule(pl.LightningModule):
         self.log("bal_acc", balanced_acc, rank_zero_only=True, prog_bar=False)
 
     def configure_optimizers(self):
-        params = [p for p in self.model.parameters() if p.requires_grad]
+        params = [p for p in self.model.parameters() if p.requires_grad] + list(self.cls_head.parameters())
         optimizer = torch.optim.AdamW(
             params, lr=self.cfg.training.lr, weight_decay=self.cfg.training.weight_decay
         )
