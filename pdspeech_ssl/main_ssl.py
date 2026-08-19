@@ -6,6 +6,7 @@ import torch
 from hydra.core.config_store import ConfigStore
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
+from lightning.pytorch.strategies import DDPStrategy
 
 from pdspeech_ssl.config import HParams
 from pdspeech_ssl.data import PDSpeechDataModule
@@ -44,11 +45,17 @@ def main(cfg: HParams) -> None:
     )
     lr_monitor_cb = LearningRateMonitor(logging_interval="step")
 
+    # find_unused_parameters=True: training_step calls self.model(...) twice per step
+    # (once per contrastive view), and with LoRA freezing most of wav2vec2, the two
+    # calls' autograd graphs don't always touch an identical set of trainable params --
+    # plain strategy="ddp" (find_unused_parameters=False) crashes on that mismatch.
+    strategy = DDPStrategy(find_unused_parameters=True) if cfg.training.strategy == "ddp" else cfg.training.strategy
+
     trainer = pl.Trainer(
         max_epochs=cfg.training.max_epochs,
         accelerator=cfg.training.accelerator,
         devices=cfg.training.devices,
-        strategy=cfg.training.strategy,
+        strategy=strategy,
         precision=cfg.training.precision,
         accumulate_grad_batches=cfg.training.accumulate_grad_batches,
         gradient_clip_val=cfg.training.gradient_clip_val,
