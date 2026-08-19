@@ -62,7 +62,7 @@ class DataHParams:
     # fraction of HC/PD individuals assigned to val; MSA/PSP/DYS individuals always go to train
     val_fraction: float = 0.25
     split_seed: int = 42
-    max_audio_seconds: float = 20.0  # safety cap, matches the preprocessing pipeline's own bound
+    max_audio_seconds: float = 10.0  # hard cap: waveforms are truncated to this length in load_waveform
     num_workers: int = 8
 
 
@@ -74,7 +74,7 @@ class LossHParams:
 
 @dataclass
 class TrainingHParams:
-    batch_size_per_gpu: int = 64  # number of INDIVIDUALS per GPU per step (=> 2x that many views)
+    batch_size_per_gpu: int = 16  # number of INDIVIDUALS per GPU per step (=> 2x that many views)
     lr: float = 1e-4
     weight_decay: float = 1e-2
     warmup_steps: int = 500
@@ -85,7 +85,7 @@ class TrainingHParams:
     devices: int = 4
     accelerator: str = "gpu"
     strategy: str = "ddp"
-    accumulate_grad_batches: int = 1
+    accumulate_grad_batches: int = 4  # keeps effective batch size (16*4=64/gpu) equal to the pre-OOM batch_size_per_gpu=64
     gradient_clip_val: float = 1.0
     # how often (in epochs) to run the HC/PD linear probe during validation
     probe_every_n_epochs: int = 1

@@ -71,7 +71,7 @@ def split_individuals(
     return train, val
 
 
-def load_waveform(path: Path, sample_rate: int) -> torch.Tensor:
+def load_waveform(path: Path, sample_rate: int, max_seconds: float | None = None) -> torch.Tensor:
     audio, sr = sf.read(str(path), dtype="float32", always_2d=False)
     if audio.ndim > 1:
         audio = audio.mean(axis=1)
@@ -80,6 +80,8 @@ def load_waveform(path: Path, sample_rate: int) -> torch.Tensor:
         import torchaudio.functional as AF
 
         wav = AF.resample(wav, sr, sample_rate)
+    if max_seconds is not None:
+        wav = wav[: int(max_seconds * sample_rate)]
     return wav
 
 
@@ -113,8 +115,14 @@ class IndividualPairDataset(Dataset):
         else:
             p1 = p2 = ind.paths[0]
 
-        wav1 = augment_waveform(load_waveform(p1, self.data_cfg.sample_rate), self.augment_cfg, self.data_cfg.sample_rate)
-        wav2 = augment_waveform(load_waveform(p2, self.data_cfg.sample_rate), self.augment_cfg, self.data_cfg.sample_rate)
+        wav1 = augment_waveform(
+            load_waveform(p1, self.data_cfg.sample_rate, self.data_cfg.max_audio_seconds),
+            self.augment_cfg, self.data_cfg.sample_rate,
+        )
+        wav2 = augment_waveform(
+            load_waveform(p2, self.data_cfg.sample_rate, self.data_cfg.max_audio_seconds),
+            self.augment_cfg, self.data_cfg.sample_rate,
+        )
         return {"view1": wav1, "view2": wav2, "label": ind.label, "key": ind.key}
 
 
@@ -162,7 +170,7 @@ class SegmentDataset(Dataset):
 
     def __getitem__(self, idx: int):
         path, label = self.segments[idx]
-        wav = load_waveform(path, self.data_cfg.sample_rate)
+        wav = load_waveform(path, self.data_cfg.sample_rate, self.data_cfg.max_audio_seconds)
         return {"wav": wav, "label": label}
 
 
