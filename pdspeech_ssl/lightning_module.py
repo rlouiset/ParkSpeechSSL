@@ -63,26 +63,33 @@ class SSLLightningModule(pl.LightningModule):
         return torch.cat(all_embd, dim=0), torch.tensor(all_labels, dtype=torch.long)
 
     def on_validation_epoch_end(self) -> None:
-        if not self.trainer.is_global_zero:
-            return
-        if (self.current_epoch + 1) % self.cfg.training.probe_every_n_epochs != 0:
-            return
+        # -1.0 sentinel (outside balanced-accuracy/AUC's [0, 1] range) for epochs where
+        # the probe doesn't run or can't be evaluated (missing a class) -- ModelCheckpoint's
+        # mode="max" monitor will simply never pick these as the best epoch.
+        balanced_acc, auc = -1.0, -1.0
+        should_probe = (self.current_epoch + 1) % self.cfg.training.probe_every_n_epochs == 0
 
-        datamodule = self.trainer.datamodule
-        train_embd, train_labels = self._embed_segments(datamodule.probe_train_dataloader())
-        val_embd, val_labels = self._embed_segments(datamodule.probe_val_dataloader())
-        self.model.train()
+        if should_probe and self.trainer.is_global_zero:
+            datamodule = self.trainer.datamodule
+            train_embd, train_labels = self._embed_segments(datamodule.probe_train_dataloader())
+            val_embd, val_labels = self._embed_segments(datamodule.probe_val_dataloader())
+            self.model.train()
 
-        if train_labels.unique().numel() < 2 or val_labels.unique().numel() < 2:
-            return  # can't fit/evaluate a binary probe without both classes present
+            if train_labels.unique().numel() >= 2 and val_labels.unique().numel() >= 2:
+                balanced_acc, auc = train_and_eval_linear_probe(
+                    train_embd, train_labels, val_embd, val_labels,
+                    lr=self.cfg.training.probe_lr,
+                    epochs=self.cfg.training.probe_epochs,
+                    weight_decay=self.cfg.training.probe_weight_decay,
+                    device=self.device,
+                )
 
-        balanced_acc, auc = train_and_eval_linear_probe(
-            train_embd, train_labels, val_embd, val_labels,
-            lr=self.cfg.training.probe_lr,
-            epochs=self.cfg.training.probe_epochs,
-            weight_decay=self.cfg.training.probe_weight_decay,
-            device=self.device,
-        )
+        # The probe only runs on rank 0 (it's expensive); broadcast the result so every
+        # rank logs the same value -- otherwise ModelCheckpoint's monitor check, which runs
+        # independently per rank, crashes on ranks that never called self.log for this key.
+        if self.trainer.world_size > 1:
+            balanced_acc, auc = self.trainer.strategy.broadcast((balanced_acc, auc), src=0)
+
         self.log("Val/hc_pd_balanced_accuracy", balanced_acc, rank_zero_only=True, prog_bar=True)
         self.log("Val/hc_pd_auc", auc, rank_zero_only=True, prog_bar=True)
         # slash-free alias so ModelCheckpoint's filename template can reference it
