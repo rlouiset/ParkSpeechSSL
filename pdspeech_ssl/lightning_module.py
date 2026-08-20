@@ -97,6 +97,15 @@ class SSLLightningModule(pl.LightningModule):
         # (see NOTE in main_ssl.py -- "/" in a template key is read as a subdirectory)
         self.log("bal_acc", balanced_acc, rank_zero_only=True, prog_bar=False)
 
+    def on_save_checkpoint(self, checkpoint: dict) -> None:
+        # wav2vec2's frozen base weights (~1.2GB) never change from the pretrained
+        # checkpoint and don't need saving every time -- only the LoRA adapters and
+        # the small custom heads are actually trainable. Cuts checkpoint size ~100x.
+        # NOTE: reloading one of these later needs load_state_dict(..., strict=False),
+        # since the frozen backbone is intentionally absent from the saved state_dict.
+        trainable = {name for name, p in self.named_parameters() if p.requires_grad}
+        checkpoint["state_dict"] = {k: v for k, v in checkpoint["state_dict"].items() if k in trainable}
+
     def configure_optimizers(self):
         params = [p for p in self.model.parameters() if p.requires_grad] + list(self.cls_head.parameters())
         optimizer = torch.optim.AdamW(

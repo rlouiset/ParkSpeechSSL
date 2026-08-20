@@ -18,7 +18,7 @@ module purge
 conda deactivate
 module load miniforge/24.9.0
 conda activate py39  # must have: torch, torchaudio, lightning, wandb, transformers==4.53.3,
-                     # peft, soundfile, scikit-learn, hydra-core, omegaconf installed
+                     # peft, soundfile, scikit-learn, hydra-core, omegaconf, pyloudnorm installed
 
 export WANDB_MODE=offline
 export HF_HOME=$WORK/hf_cache  # must match the HF_HOME used to pre-download the checkpoint on the login node

@@ -63,6 +63,12 @@ class DataHParams:
     val_fraction: float = 0.2
     split_seed: int = 42
     max_audio_seconds: float = 10.0  # hard cap: waveforms are truncated to this length in load_waveform
+    # LUFS integrated-loudness normalization target (EBU R128 broadcast default); a single
+    # global per-clip gain, applied in load_waveform before augmentation. Removes absolute
+    # level (heavily confounded by this project's per-corpus recording setups) while leaving
+    # within-clip dynamic range/loudness variability untouched (gain-invariant by construction).
+    # Set to None to disable.
+    target_lufs: Optional[float] = -23.0
     num_workers: int = 8
 
 
