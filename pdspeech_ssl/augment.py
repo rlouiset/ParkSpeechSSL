@@ -71,22 +71,62 @@ def bandlimit(x: torch.Tensor, orig_sr: int, target_sr: int) -> torch.Tensor:
     return AF.resample(down, target_sr, orig_sr)
 
 
-def augment_waveform(x: torch.Tensor, cfg: AugmentHParams, sr: int = 16000) -> torch.Tensor:
+def augment_waveform(
+    x: torch.Tensor,
+    cfg: AugmentHParams,
+    sr: int = 16000,
+) -> torch.Tensor:
+
+    augmentations = []
+
     if random.random() < cfg.crop_prob:
-        ratio = random.uniform(*cfg.crop_ratio_range)
-        x = random_crop(x, ratio)
+        augmentations.append(
+            lambda x: random_crop(
+                x,
+                random.uniform(*cfg.crop_ratio_range),
+            )
+        )
+
     if random.random() < cfg.reverb_prob:
-        decay = random.uniform(*cfg.reverb_decay_range)
-        x = synthetic_reverb(x, decay, sr)
+        augmentations.append(
+            lambda x: synthetic_reverb(
+                x,
+                random.uniform(*cfg.reverb_decay_range),
+                sr,
+            )
+        )
+
     if random.random() < cfg.bandlimit_prob:
-        target_sr = random.choice(cfg.bandlimit_sr_choices)
-        x = bandlimit(x, sr, target_sr)
+        augmentations.append(
+            lambda x: bandlimit(
+                x,
+                sr,
+                random.choice(cfg.bandlimit_sr_choices),
+            )
+        )
+
     if random.random() < cfg.gain_prob:
-        gain_db = random.uniform(*cfg.gain_db_range)
-        x = apply_gain(x, gain_db)
+        augmentations.append(
+            lambda x: apply_gain(
+                x,
+                random.uniform(*cfg.gain_db_range),
+            )
+        )
+
     if random.random() < cfg.noise_prob:
-        snr_db = random.uniform(*cfg.noise_snr_db_range)
-        x = add_noise(x, snr_db)
+        augmentations.append(
+            lambda x: add_noise(
+                x,
+                random.uniform(*cfg.noise_snr_db_range),
+            )
+        )
+
+    # Apply at most one recording-condition perturbations.
+    random.shuffle(augmentations)
+
+    for aug in augmentations[:1]:
+        x = aug(x)
+
     return x
 
 

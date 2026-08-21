@@ -43,7 +43,6 @@ def main(cfg: HParams) -> None:
         save_top_k=3,
         save_last=True,
     )
-    lr_monitor_cb = LearningRateMonitor(logging_interval="step")
 
     # find_unused_parameters=True: training_step calls self.model(...) twice per step
     # (once per contrastive view), and with LoRA freezing most of wav2vec2, the two
@@ -58,11 +57,10 @@ def main(cfg: HParams) -> None:
         strategy=strategy,
         precision=cfg.training.precision,
         accumulate_grad_batches=cfg.training.accumulate_grad_batches,
-        gradient_clip_val=cfg.training.gradient_clip_val,
         limit_train_batches=cfg.training.limit_train_batches,
         limit_val_batches=cfg.training.limit_val_batches,
         logger=wandb_logger,
-        callbacks=[checkpoint_cb, lr_monitor_cb],
+        callbacks=[checkpoint_cb],
         check_val_every_n_epoch=1,
     )
 

@@ -34,24 +34,33 @@ class ModelHParams:
 
 @dataclass
 class AugmentHParams:
-    # Everything here perturbs *recording condition*, not voice production
-    # (no pitch-shift / time-stretch / formant warping -- those would destroy
-    # the F0/jitter/shimmer/speech-rate biomarkers this model should learn to be
-    # sensitive to for the HC/PD probe).
-    noise_prob: float = 0.5
-    noise_snr_db_range: List[float] = field(default_factory=lambda: [5.0, 30.0])
-    gain_prob: float = 0.5
-    gain_db_range: List[float] = field(default_factory=lambda: [-6.0, 6.0])
-    crop_prob: float = 0.7
-    crop_ratio_range: List[float] = field(default_factory=lambda: [0.8, 1.0])
-    reverb_prob: float = 0.3
-    reverb_decay_range: List[float] = field(default_factory=lambda: [0.1, 0.4])
-    bandlimit_prob: float = 0.3
-    bandlimit_sr_choices: List[int] = field(default_factory=lambda: [8000, 11025])
-    # Feature-level time masking applied to the wav2vec2 output sequence
-    # (same spirit as wav2vec2's own pretraining masking), independent per view.
-    feature_mask_prob: float = 0.3
-    feature_mask_fraction: float = 0.15
+    noise_prob: float = 0.25
+    noise_snr_db_range: List[float] = field(
+        default_factory=lambda: [18.0, 30.0]
+    )
+
+    gain_prob: float = 0.25
+    gain_db_range: List[float] = field(
+        default_factory=lambda: [-3.0, 3.0]
+    )
+
+    crop_prob: float = 0.0
+    crop_ratio_range: List[float] = field(
+        default_factory=lambda: [0.95, 1.0]
+    )
+
+    reverb_prob: float = 0.10
+    reverb_decay_range: List[float] = field(
+        default_factory=lambda: [0.10, 0.20]
+    )
+
+    bandlimit_prob: float = 0.10
+    bandlimit_sr_choices: List[int] = field(
+        default_factory=lambda: [11025]
+    )
+
+    feature_mask_prob: float = 0.10
+    feature_mask_fraction: float = 0.05
 
 
 @dataclass
@@ -61,7 +70,7 @@ class DataHParams:
     # fraction of HC/PD individuals assigned to val; MSA/PSP/DYS individuals always go to train
     val_fraction: float = 0.2
     split_seed: int = 42
-    max_audio_seconds: float = 10.0  # hard cap: waveforms are truncated to this length in load_waveform
+    max_audio_seconds: float = 20.0  # hard cap: waveforms are truncated to this length in load_waveform
     # LUFS integrated-loudness normalization target (EBU R128 broadcast default); a single
     # global per-clip gain, applied in load_waveform before augmentation. Removes absolute
     # level (heavily confounded by this project's per-corpus recording setups) while leaving
@@ -98,7 +107,6 @@ class TrainingHParams:
     # on top of only ~5-6 micro-batches/epoch/GPU was leaving just ~1 real optimizer step
     # per epoch, which is why the loss/probe were flat (still deep in warmup after 48 epochs).
     accumulate_grad_batches: int = 1
-    gradient_clip_val: float = 1.0
     # how often (in epochs) to run the HC/PD linear probe during validation
     probe_every_n_epochs: int = 1
     probe_lr: float = 1e-2

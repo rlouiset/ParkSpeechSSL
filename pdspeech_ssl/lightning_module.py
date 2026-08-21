@@ -111,16 +111,6 @@ class SSLLightningModule(pl.LightningModule):
         optimizer = torch.optim.AdamW(
             params, lr=self.cfg.training.lr, weight_decay=self.cfg.training.weight_decay
         )
-
-        warmup_steps = self.cfg.training.warmup_steps
-
-        def lr_lambda(step: int) -> float:
-            if step < warmup_steps:
-                return (step + 1) / max(1, warmup_steps)
-            return 1.0
-
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
         return {
-            "optimizer": optimizer,
-            "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
+            "optimizer": optimizer
         }
