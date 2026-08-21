@@ -121,7 +121,7 @@ class TrainingHParams:
 @dataclass
 class WandbHParams:
     project: str = "pdspeech_ssl"
-    name: str = "wav2vec2xlsr_lora_transformer"
+    name: str = "wav2vec2xlsr_full_blstm"
     mode: str = "online"  # overridden to "offline" via WANDB_MODE env on clusters w/o internet
 
 
