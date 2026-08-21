@@ -38,6 +38,7 @@ RAW_ROOT = Path("/Users/robinlouiset/Documents/ParkSpeechData/raw/FredPrior_AnuH
 OUT_ROOT = Path("/Users/robinlouiset/Documents/ParkSpeechData/derivatives/FredPrior")
 
 SR = 16000
+MIN_PHONATION_DURATION = 2.0  # drop vowel-phonation files shorter than this entirely
 MAX_PHONATION_DURATION = 20.0  # drop vowel-phonation files longer than this entirely (safety net)
 
 SUBDIRS = {
@@ -96,7 +97,7 @@ def collect_files() -> list[PatientFile]:
 
 
 def segments_for_file(duration: float) -> list[Segment]:
-    if duration > MAX_PHONATION_DURATION:
+    if duration > MAX_PHONATION_DURATION or duration < MIN_PHONATION_DURATION:
         return []
     return [Segment(0.0, duration)]
 

@@ -58,6 +58,7 @@ RAW_ROOT = Path("/Users/robinlouiset/Documents/ParkSpeechData/raw/NeuroVoz/data/
 OUT_ROOT = Path("/Users/robinlouiset/Documents/ParkSpeechData/derivatives/NeuroVoz")
 
 SR = 16000
+MIN_OUTPUT_DURATION = 2.0  # drop any output segment shorter than this, regardless of which path produced it
 MIN_KEEP_DURATION = 10.0  # below this, keep the file whole
 MIN_SEGMENT_DURATION = 6.0  # drop VAD segments (or chunks) shorter than this
 MAX_SEGMENT_DURATION = 10.0  # VAD segments longer than this are chunked into pieces of this size
@@ -184,7 +185,10 @@ def out_name(label: str, phash: str, segment_index: int) -> str:
 
 def process_file(pf: PatientFile, next_index: dict[str, int]) -> int:
     duration = sf.info(str(pf.path)).duration
-    segments = segments_for_file(pf.path, pf.task, duration)
+    segments = [
+        seg for seg in segments_for_file(pf.path, pf.task, duration)
+        if seg.end - seg.start >= MIN_OUTPUT_DURATION
+    ]
 
     written = 0
     for segment in segments:

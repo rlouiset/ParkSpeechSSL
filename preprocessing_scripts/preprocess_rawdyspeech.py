@@ -65,6 +65,7 @@ GROUP_LABELS = {"0": "HC", "1": "DYS"}
 
 SR = 16000
 TOP_N = 15
+MIN_DURATION = 2.0  # candidates (either pattern) shorter than this are dropped entirely
 MAX_DURATION = 10.0  # candidates (either pattern) at or above this are dropped entirely
 VAD_THRESHOLD = 0.5
 
@@ -163,7 +164,7 @@ def process_standard(label: str, label_dir: Path, fallback_counter: list[int]) -
             if fell_back:
                 fallback_counter[0] += 1
             ranked.append((path, span, span.end - span.start))
-        ranked = [r for r in ranked if r[2] < MAX_DURATION]
+        ranked = [r for r in ranked if MIN_DURATION <= r[2] < MAX_DURATION]
         ranked.sort(key=lambda x: x[2], reverse=True)
 
         phash = patient_hash(label, "standard", pid)
@@ -189,7 +190,7 @@ def process_wavmic(label: str, label_dir: Path, fallback_counter: list[int]) -> 
                     best = (path, span, dur)
             candidates.append(best)
 
-        candidates = [c for c in candidates if c[2] < MAX_DURATION]
+        candidates = [c for c in candidates if MIN_DURATION <= c[2] < MAX_DURATION]
         candidates.sort(key=lambda x: x[2], reverse=True)
 
         phash = patient_hash(label, "wavmic", token)

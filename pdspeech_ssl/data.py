@@ -80,7 +80,10 @@ def normalize_loudness(wav: torch.Tensor, sample_rate: int, target_lufs: float) 
 
     audio = wav.numpy()
     meter = pyln.Meter(sample_rate)
-    loudness = meter.integrated_loudness(audio)
+    try:
+        loudness = meter.integrated_loudness(audio)
+    except ValueError:
+        return wav  # shorter than the meter's gating block -- can't measure, nothing to normalize
     if loudness == float("-inf"):
         return wav  # silence / near-silence -- meter can't measure, nothing to normalize
     normalized = pyln.normalize.loudness(audio, loudness, target_lufs)
