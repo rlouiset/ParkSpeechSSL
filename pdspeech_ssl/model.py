@@ -11,41 +11,23 @@ from pdspeech_ssl.augment import feature_time_mask
 from pdspeech_ssl.config import EncoderHParams, ModelHParams, AugmentHParams
 
 
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=5000):
+class BiLSTMEncoder(nn.Module):
+    """BiLSTM over the wav2vec2 frame sequence, pooled via learned additive
+    attention over time (masked to each sample's real length)."""
+
+    def __init__(self, input_dim, d_model=128, num_layers=2, dropout=0.1):
         super().__init__()
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-torch.log(torch.tensor(10000.0)) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer("pe", pe.unsqueeze(0))
-
-    def forward(self, x):
-        return x + self.pe[:, : x.size(1)]
-
-
-class TemporalTransformerEncoder(nn.Module):
-    def __init__(self, input_dim, d_model=128, n_heads=1, num_layers=2, dropout=0.1):
-        super().__init__()
-        self.input_proj = nn.Linear(input_dim, d_model)
-        self.pos_encoding = PositionalEncoding(d_model)
         self.dropout = nn.Dropout(dropout)
-
-        # Learnable [CLS] token (1, 1, d_model)
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
-        nn.init.trunc_normal_(self.cls_token, std=0.02)
-
-        # Transformer encoder
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=n_heads,
-            dim_feedforward=d_model,
-            dropout=dropout,
+        self.blstm = nn.LSTM(
+            input_size=input_dim,
+            hidden_size=d_model,
+            num_layers=num_layers,
             batch_first=True,
-            activation="gelu",
+            bidirectional=True,
+            dropout=dropout if num_layers > 1 else 0.0,
         )
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.attn_pool = nn.Linear(2 * d_model, 1)
+        self.output_proj = nn.Linear(2 * d_model, d_model)
 
     def forward(self, x, lengths):
         """
@@ -53,30 +35,22 @@ class TemporalTransformerEncoder(nn.Module):
             x: (B, T, F)
             lengths: (B,) actual sequence lengths
         Returns:
-            cls_out: (B, d_model)
+            pooled: (B, d_model)
         """
         B, T, _ = x.shape
         device = x.device
 
-        # Project to d_model
-        x = self.input_proj(x)
-        x = self.pos_encoding(x)
         x = self.dropout(x)
+        packed = nn.utils.rnn.pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
+        packed_out, _ = self.blstm(packed)
+        H, _ = nn.utils.rnn.pad_packed_sequence(packed_out, batch_first=True, total_length=T)  # (B, T, 2*d_model)
 
-        # Add [CLS] token at the beginning
-        cls_token = self.cls_token.expand(B, -1, -1)  # (B, 1, d_model)
-        x = torch.cat([cls_token, x], dim=1)  # (B, T+1, d_model)
+        mask = torch.arange(T, device=device)[None, :] >= lengths[:, None]  # True = pad
+        scores = self.attn_pool(H).squeeze(-1).masked_fill(mask, float("-inf"))  # (B, T)
+        weights = torch.softmax(scores, dim=1)
+        pooled = torch.bmm(weights.unsqueeze(1), H).squeeze(1)  # (B, 2*d_model)
 
-        # Build key padding mask (True = pad)
-        mask = torch.arange(T, device=device)[None, :] >= lengths[:, None]
-        mask = torch.cat([torch.zeros(B, 1, device=device, dtype=torch.bool), mask], dim=1)  # add CLS=False
-
-        # Transformer encoding
-        x = self.encoder(x, src_key_padding_mask=mask)
-
-        # Return only the [CLS] embedding
-        cls_out = x[:, 0, :]  # (B, d_model)
-        return cls_out
+        return self.output_proj(pooled)  # (B, d_model)
 
 
 class SSLOutput(TypedDict):
@@ -126,10 +100,9 @@ class SSLEncoder(nn.Module):
             self.projector = nn.Linear(in_dim, model_cfg.d_proj)
         d_temporal_input = model_cfg.d_proj if model_cfg.d_proj is not None else in_dim
 
-        self.temporal_transformer = TemporalTransformerEncoder(
+        self.temporal_encoder = BiLSTMEncoder(
             input_dim=d_temporal_input,
             d_model=model_cfg.d_blstm,
-            n_heads=model_cfg.n_att,
             num_layers=model_cfg.blstm_layers,
             dropout=model_cfg.dropout,
         )
@@ -176,7 +149,7 @@ class SSLEncoder(nn.Module):
         if self.projector is not None:
             X = self.projector(X)
 
-        H_speech = self.temporal_transformer(X, lengths)
+        H_speech = self.temporal_encoder(X, lengths)
         embd = self.embedding_projector(H_speech)
         proj = self.proj_head(embd)
 

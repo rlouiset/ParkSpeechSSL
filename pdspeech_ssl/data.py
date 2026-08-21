@@ -87,7 +87,16 @@ def normalize_loudness(wav: torch.Tensor, sample_rate: int, target_lufs: float) 
     if loudness == float("-inf"):
         return wav  # silence / near-silence -- meter can't measure, nothing to normalize
     normalized = pyln.normalize.loudness(audio, loudness, target_lufs)
-    return torch.from_numpy(normalized).float().clamp(-1.0, 1.0)
+
+    # pyln.normalize.loudness applies one flat gain with no headroom/peak awareness, so a
+    # quiet clip needing a big boost can land past full scale. Back off with a single extra
+    # proportional rescale of the whole clip (preserves waveform shape) instead of clamping
+    # samples (which would hard-clip/distort exactly the loudest peaks).
+    peak = float(abs(normalized).max())
+    if peak > 1.0:
+        normalized = normalized * (0.99 / peak)
+
+    return torch.from_numpy(normalized).float()
 
 
 def load_waveform(

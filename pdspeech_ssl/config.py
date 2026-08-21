@@ -15,7 +15,7 @@ class EncoderHParams:
     # "lora": base weights frozen, LoRA adapters on attention q/v projections.
     # "full": every wav2vec2 weight above the CNN feature extractor is trainable
     #   (the CNN feature extractor is always frozen, standard practice for wav2vec2 fine-tuning).
-    trainable_mode: str = "lora"
+    trainable_mode: str = "frozen"
     lora_r: int = 16
     lora_alpha: int = 32
     lora_dropout: float = 0.05
@@ -24,12 +24,11 @@ class EncoderHParams:
 
 @dataclass
 class ModelHParams:
-    d_proj: Optional[int] = None  # projection dim before the temporal transformer (null = skip)
-    blstm_layers: int = 2  # kept this name to mirror HDSNetModelHParams; feeds num_layers of the temporal transformer
-    d_blstm: int = 128  # kept this name to mirror HDSNetModelHParams; feeds d_model of the temporal transformer
+    d_proj: Optional[int] = None  # projection dim before the BiLSTM temporal encoder (null = skip)
+    blstm_layers: int = 2  # num_layers of the BiLSTM temporal encoder
+    d_blstm: int = 128  # hidden size per direction of the BiLSTM temporal encoder
     d_emb: int = 32
     dropout: float = 0.2
-    n_att: int = 2  # number of attention heads (d_blstm=128 divisible by 2)
     proj_head_dim: int = 32  # SimCLR-style projection head output dim (contrastive loss only, not the linear probe)
 
 
@@ -81,7 +80,7 @@ class LossHParams:
 @dataclass
 class TrainingHParams:
     batch_size_per_gpu: int = 16  # number of INDIVIDUALS per GPU per step (=> 2x that many views)
-    lr: float = 1e-4
+    lr: float = 3e-4  # bumped 3x from 1e-4 -- worth watching for instability now that trainable_mode="frozen"
     weight_decay: float = 1e-2
     # ~370 train individuals / 4 GPUs / batch_size_per_gpu=16 => only ~5-6 optimizer
     # steps/epoch; 500 would take ~100 epochs just to finish warmup, so scale it down
