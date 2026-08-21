@@ -15,7 +15,7 @@ class EncoderHParams:
     # "lora": base weights frozen, LoRA adapters on attention q/v projections.
     # "full": every wav2vec2 weight above the CNN feature extractor is trainable
     #   (the CNN feature extractor is always frozen, standard practice for wav2vec2 fine-tuning).
-    trainable_mode: str = "full"
+    trainable_mode: str = "lora"
     lora_r: int = 16
     lora_alpha: int = 32
     lora_dropout: float = 0.05
@@ -121,7 +121,7 @@ class TrainingHParams:
 @dataclass
 class WandbHParams:
     project: str = "pdspeech_ssl"
-    name: str = "wav2vec2xlsr_full_blstm"
+    name: str = "wav2vec2xlsr_lora16_blstm"
     mode: str = "online"  # overridden to "offline" via WANDB_MODE env on clusters w/o internet
 
 
