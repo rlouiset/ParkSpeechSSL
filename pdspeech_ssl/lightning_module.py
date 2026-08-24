@@ -7,46 +7,80 @@ import lightning.pytorch as pl
 from pdspeech_ssl.config import HParams
 from pdspeech_ssl.data import PairBatch, SegmentBatch
 from pdspeech_ssl.linear_probe import train_and_eval_linear_probe
+from pdspeech_ssl.losses import nt_xent_loss
 from pdspeech_ssl.model import SSLEncoder
 
 LABEL_TO_BINARY = {"HC": 0, "PD": 1}
+OBJECTIVES = ("simclr", "hc_vs_rest_bce")
 
 
 def _hc_vs_rest_targets(labels: list, device: torch.device) -> torch.Tensor:
     """0.0 for HC, 1.0 for everything else (PD/MSA/PSP/DYS) -- a reachability
-    sanity check for whether the encoder can learn anything at all before
-    going back to the harder SSL contrastive objective."""
+    sanity check for whether the encoder can learn anything at all, kept
+    available alongside the primary SimCLR objective (see TrainingHParams.objective)."""
     return torch.tensor([0.0 if label == "HC" else 1.0 for label in labels], device=device)
 
 
 class SSLLightningModule(pl.LightningModule):
     def __init__(self, cfg: HParams):
         super().__init__()
+        if cfg.training.objective not in OBJECTIVES:
+            raise ValueError(f"Unknown training.objective: {cfg.training.objective!r}, expected one of {OBJECTIVES}")
         self.cfg = cfg
         self.model = SSLEncoder(cfg.encoder, cfg.model)
-        self.cls_head = nn.Linear(cfg.model.d_emb, 1)
-        self.bce = nn.BCEWithLogitsLoss()
+        # cls_head only exists for the hc_vs_rest_bce objective -- keeping it out of the
+        # graph entirely under simclr (rather than just unused) avoids padding DDP's
+        # unused-parameter bookkeeping and the checkpoint with dead weights every step.
+        self.cls_head = nn.Linear(cfg.model.d_emb, 1) if cfg.training.objective == "hc_vs_rest_bce" else None
+        self.bce = nn.BCEWithLogitsLoss() if cfg.training.objective == "hc_vs_rest_bce" else None
+
+    def _embed_pair(self, batch: PairBatch) -> tuple[torch.Tensor, torch.Tensor]:
+        out1 = self.model(batch["view1"], batch["len1"], augment_cfg=self.cfg.augment)
+        out2 = self.model(batch["view2"], batch["len2"], augment_cfg=self.cfg.augment)
+        return out1, out2
+
+    def _contrastive_loss(self, batch: PairBatch) -> torch.Tensor:
+        """SimCLR NT-Xent: aligns view1[i]/view2[i] -- the two augmented views of the
+        *same individual* from IndividualPairDataset -- as the positive pair, against
+        every other individual in the batch (gathered across GPUs) as negatives."""
+        out1, out2 = self._embed_pair(batch)
+        z1, z2 = out1["proj"], out2["proj"]
+        if self.cfg.loss.gather_across_gpus and self.trainer.world_size > 1:
+            # sync_grads=True: gradients flow back through the gather to every
+            # rank's own local forward pass, so this is a true global negative pool,
+            # not a detached copy of the other ranks' embeddings.
+            z1 = self.all_gather(z1, sync_grads=True).flatten(0, 1)
+            z2 = self.all_gather(z2, sync_grads=True).flatten(0, 1)
+        return nt_xent_loss(z1, z2, self.cfg.loss.temperature)
 
     def _classification_loss(self, batch: PairBatch) -> torch.Tensor:
-        embd1 = self.model(batch["view1"], batch["len1"], augment_cfg=self.cfg.augment)["embd"]
-        embd2 = self.model(batch["view2"], batch["len2"], augment_cfg=self.cfg.augment)["embd"]
+        out1, out2 = self._embed_pair(batch)
         targets = _hc_vs_rest_targets(batch["labels"], self.device)
-        logit1 = self.cls_head(embd1).squeeze(-1)
-        logit2 = self.cls_head(embd2).squeeze(-1)
+        logit1 = self.cls_head(out1["embd"]).squeeze(-1)
+        logit2 = self.cls_head(out2["embd"]).squeeze(-1)
         return 0.5 * (self.bce(logit1, targets) + self.bce(logit2, targets))
 
+    def _step_loss(self, batch: PairBatch) -> torch.Tensor:
+        if self.cfg.training.objective == "simclr":
+            return self._contrastive_loss(batch)
+        return self._classification_loss(batch)
+
+    @property
+    def _loss_metric_name(self) -> str:
+        return "contrastive_loss" if self.cfg.training.objective == "simclr" else "hc_vs_rest_bce"
+
     def training_step(self, batch: PairBatch, batch_idx: int) -> torch.Tensor:
-        loss = self._classification_loss(batch)
+        loss = self._step_loss(batch)
         self.log(
-            "Train/hc_vs_rest_bce", loss, on_step=True, on_epoch=True,
+            f"Train/{self._loss_metric_name}", loss, on_step=True, on_epoch=True,
             sync_dist=True, batch_size=batch["view1"].shape[0], prog_bar=True,
         )
         return loss
 
     def validation_step(self, batch: PairBatch, batch_idx: int) -> None:
-        loss = self._classification_loss(batch)
+        loss = self._step_loss(batch)
         self.log(
-            "Val/hc_vs_rest_bce", loss, on_step=False, on_epoch=True,
+            f"Val/{self._loss_metric_name}", loss, on_step=False, on_epoch=True,
             sync_dist=True, batch_size=batch["view1"].shape[0],
         )
 
@@ -107,7 +141,9 @@ class SSLLightningModule(pl.LightningModule):
         checkpoint["state_dict"] = {k: v for k, v in checkpoint["state_dict"].items() if k in trainable}
 
     def configure_optimizers(self):
-        params = [p for p in self.model.parameters() if p.requires_grad] + list(self.cls_head.parameters())
+        params = [p for p in self.model.parameters() if p.requires_grad]
+        if self.cls_head is not None:
+            params += list(self.cls_head.parameters())
         optimizer = torch.optim.AdamW(
             params, lr=self.cfg.training.lr, weight_decay=self.cfg.training.weight_decay
         )

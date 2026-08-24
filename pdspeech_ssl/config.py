@@ -88,6 +88,15 @@ class LossHParams:
 
 @dataclass
 class TrainingHParams:
+    # "simclr": NT-Xent contrastive loss aligning the two augmented views of the same
+    #   individual (IndividualPairDataset's view1[i]/view2[i]) against all other
+    #   individuals in the (globally-gathered) batch as negatives. HC/PD is evaluated
+    #   only via the rank-0 linear probe below, never backpropagated into the encoder.
+    # "hc_vs_rest_bce": direct supervised HC-vs-rest (PD/MSA/PSP/DYS) binary classification
+    #   loss on both views, backpropagated straight into the encoder -- a reachability
+    #   sanity check, kept available via configs/hc_vs_rest.yaml to relaunch on demand.
+    # validated at runtime in lightning_module.py.
+    objective: str = "simclr"
     batch_size_per_gpu: int = 16  # number of INDIVIDUALS per GPU per step (=> 2x that many views)
     lr: float = 3e-4  # bumped 3x from 1e-4 -- worth watching for instability now that trainable_mode="frozen"
     weight_decay: float = 1e-2
@@ -121,7 +130,7 @@ class TrainingHParams:
 @dataclass
 class WandbHParams:
     project: str = "pdspeech_ssl"
-    name: str = "wav2vec2xlsr_lora16_blstm"
+    name: str = "wav2vec2xlsr_lora16_blstm_simclr"
     mode: str = "online"  # overridden to "offline" via WANDB_MODE env on clusters w/o internet
 
 

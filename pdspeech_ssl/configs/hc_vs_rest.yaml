@@ -1,0 +1,13 @@
+defaults:
+  - base_config
+  - _self_
+
+# Direct supervised HC-vs-rest classification, kept as an on-demand alternative to
+# the primary SimCLR contrastive objective in default.yaml (see TrainingHParams.objective
+# in config.py for what each does). Launch with:
+#   python3 -m pdspeech_ssl.main_ssl --config-name=hc_vs_rest
+training:
+  objective: hc_vs_rest_bce
+
+wandb:
+  name: wav2vec2xlsr_lora16_blstm_hc_vs_rest_bce
