@@ -117,7 +117,7 @@ class TrainingHParams:
     #   norm emerge as an unsupervised severity signal. Kept available via
     #   configs/disease_uniformity.yaml.
     # validated at runtime in lightning_module.py.
-    objective: str = "simclr"
+    objective: str = "disease_uniformity"
     batch_size_per_gpu: int = 16  # number of INDIVIDUALS per GPU per step (=> 2x that many views)
     lr: float = 3e-4  # bumped 3x from 1e-4 -- worth watching for instability now that trainable_mode="frozen"
     weight_decay: float = 1e-2
@@ -151,7 +151,7 @@ class TrainingHParams:
 @dataclass
 class WandbHParams:
     project: str = "pdspeech_ssl"
-    name: str = "wav2vec2xlsr_full_blstm_simclr"
+    name: str = "wav2vec2xlsr_full_blstm_sepclr"
     mode: str = "online"  # overridden to "offline" via WANDB_MODE env on clusters w/o internet
 
 
