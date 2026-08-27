@@ -1,0 +1,15 @@
+defaults:
+  - base_config
+  - _self_
+
+# Alignment+uniformity hybrid (Wang & Isola) on a Z_D/Z_C-split proj_head output: aligns
+# each individual's two augmented views on a shared "common" subspace (Z_C) while forcing
+# HC individuals' "disease" subspace (Z_D) to 0, letting non-HC individuals' Z_D norm
+# emerge as an unsupervised severity signal under uniformity's anti-collapse pressure.
+# See TrainingHParams.objective / DiseaseHParams in config.py. Launch with:
+#   python3 -m pdspeech_ssl.main_ssl --config-name=disease_uniformity
+training:
+  objective: disease_uniformity
+
+wandb:
+  name: wav2vec2xlsr_lora16_blstm_disease_uniformity

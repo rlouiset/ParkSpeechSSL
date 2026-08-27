@@ -87,6 +87,22 @@ class LossHParams:
 
 
 @dataclass
+class DiseaseHParams:
+    # Only used when training.objective == "disease_uniformity". Splits the SimCLR-style
+    # proj_head output (dim = ModelHParams.proj_head_dim) into Z_D = proj[:d_disease]
+    # (disease-specific -- forced to 0 for HC individuals) and Z_C = proj[d_disease:]
+    # (shared/common -- age, sex, smoking, recording condition, etc, unconstrained).
+    # Must be < proj_head_dim.
+    d_disease: int = 8
+    leaky_slope: float = 0.2  # applied to the Z_D block only, before the final renormalize --
+    # keeps disease deviation mostly one-sided so HC (pinned at Z_D=0) can't end up
+    # geometrically "between" two disease subgroups spread into opposing directions.
+    uniformity_t: float = 2.0  # Wang & Isola's default
+    align_weight: float = 1.0
+    uniform_weight: float = 1.0
+
+
+@dataclass
 class TrainingHParams:
     # "simclr": NT-Xent contrastive loss aligning the two augmented views of the same
     #   individual (IndividualPairDataset's view1[i]/view2[i]) against all other
@@ -95,6 +111,11 @@ class TrainingHParams:
     # "hc_vs_rest_bce": direct supervised HC-vs-rest (PD/MSA/PSP/DYS) binary classification
     #   loss on both views, backpropagated straight into the encoder -- a reachability
     #   sanity check, kept available via configs/hc_vs_rest.yaml to relaunch on demand.
+    # "disease_uniformity": alignment+uniformity (Wang & Isola) on a normalized proj_head
+    #   output split into Z_D/Z_C (see DiseaseHParams) -- HC individuals' Z_D is forced to
+    #   0 (pinned to the Z_C-only equatorial subsphere), letting non-HC individuals' Z_D
+    #   norm emerge as an unsupervised severity signal. Kept available via
+    #   configs/disease_uniformity.yaml.
     # validated at runtime in lightning_module.py.
     objective: str = "simclr"
     batch_size_per_gpu: int = 16  # number of INDIVIDUALS per GPU per step (=> 2x that many views)
@@ -141,6 +162,7 @@ class HParams:
     augment: AugmentHParams = field(default_factory=AugmentHParams)
     data: DataHParams = field(default_factory=DataHParams)
     loss: LossHParams = field(default_factory=LossHParams)
+    disease: DiseaseHParams = field(default_factory=DiseaseHParams)
     training: TrainingHParams = field(default_factory=TrainingHParams)
     wandb: WandbHParams = field(default_factory=WandbHParams)
     seed: int = 42

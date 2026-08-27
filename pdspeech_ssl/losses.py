@@ -26,3 +26,19 @@ def nt_xent_loss(z1: torch.Tensor, z2: torch.Tensor, temperature: float) -> torc
 
     positive_idx = torch.cat([torch.arange(N, 2 * N), torch.arange(0, N)]).to(z.device)
     return F.cross_entropy(sim, positive_idx)
+
+
+def alignment_loss(z1: torch.Tensor, z2: torch.Tensor, alpha: float = 2.0) -> torch.Tensor:
+    """Wang & Isola (2020) alignment: expected distance between positive pairs.
+    z1, z2 must already be unit-norm (on the hypersphere) -- this and
+    uniformity_loss below are only meaningful for normalized inputs."""
+    return (z1 - z2).norm(p=2, dim=-1).pow(alpha).mean()
+
+
+def uniformity_loss(z: torch.Tensor, t: float = 2.0) -> torch.Tensor:
+    """Wang & Isola (2020) uniformity: log E[exp(-t ||x-y||^2)] over all pairs
+    in z, minimized to push embeddings toward a uniform spread on the
+    hypersphere (the anti-collapse counterpart to alignment_loss). z must
+    already be unit-norm."""
+    sq_dist = torch.pdist(z, p=2).pow(2)
+    return sq_dist.mul(-t).exp().mean().log()

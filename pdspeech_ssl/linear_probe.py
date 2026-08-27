@@ -56,3 +56,15 @@ def train_and_eval_linear_probe(
         # only one class present in val -- can happen with small probe_max_val_samples
         auc = float("nan")
     return balanced_acc, auc
+
+
+def auc_of_scores(labels: torch.Tensor, scores) -> float:
+    """ROC-AUC of a single scalar score column against binary labels (HC=0,
+    disease=1) -- e.g. the norm of a disease-specific embedding subspace.
+    No probe fitting needed since it's already a 1D signal."""
+    labels_np = labels.cpu().numpy() if isinstance(labels, torch.Tensor) else labels
+    try:
+        return roc_auc_score(labels_np, scores)
+    except ValueError:
+        # only one class present -- can happen with small probe_max_val_samples
+        return float("nan")
