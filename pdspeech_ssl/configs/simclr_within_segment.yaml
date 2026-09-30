@@ -1,0 +1,19 @@
+defaults:
+  - base_config
+  - _self_
+
+# Ablation: classic SimCLR instance-discrimination pairing -- both contrastive views
+# come from the *same* speech segment (two independent augment_waveform draws), rather
+# than from two distinct segments/recordings of the same subject (the "cross_segment"
+# default in DataHParams.pair_mode, see config.py/data.py). Isolates how much of the
+# default's signal comes from pure augmentation-invariance (noise/gain/reverb/bandwidth)
+# alone, vs. the added cross-segment/cross-recording invariance pressure. Launch with:
+#   python3 -m pdspeech_ssl.main_ssl --config-name=simclr_within_segment
+training:
+  objective: simclr
+
+data:
+  pair_mode: within_segment
+
+wandb:
+  name: wav2vec2xlsr_full_blstm_simclr_within_segment

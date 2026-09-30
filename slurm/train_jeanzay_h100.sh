@@ -27,7 +27,12 @@ export HF_HUB_OFFLINE=1  # set to 0 for the very first run so wav2vec2-xlsr-53 c
 
 cd "${SLURM_SUBMIT_DIR}"
 
+# Hydra config name (one of pdspeech_ssl/configs/*.yaml, without the extension);
+# defaults to "default" if not passed. e.g.:
+#   sbatch slurm/train_jeanzay_h100.sh simclr_within_segment
+CONFIG_NAME="${1:-default}"
+
 # --ntasks-per-node=4 + srun launches 4 processes, one per H100; Lightning's
 # SLURM environment plugin auto-detects rank/world-size from the SLURM env
 # vars, so training.devices=4 with strategy=ddp in the config just works.
-srun python3 -m pdspeech_ssl.main_ssl
+srun python3 -m pdspeech_ssl.main_ssl --config-name="${CONFIG_NAME}"

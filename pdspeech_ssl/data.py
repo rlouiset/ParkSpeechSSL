@@ -128,13 +128,26 @@ class PairBatch(TypedDict):
     keys: List[IndividualKey]
 
 
+PAIR_MODES = ("cross_segment", "within_segment")
+
+
 class IndividualPairDataset(Dataset):
-    """One item = one individual's contrastive pair. If the individual has
-    >=2 segments, the pair is two distinct (augmented) segments; if only 1
-    (e.g. every FredPrior patient), the pair is that one segment augmented
-    twice -- standard SimCLR-style fallback, so no individual is dropped."""
+    """One item = one individual's contrastive pair. Two pairing strategies,
+    selected via DataHParams.pair_mode:
+
+    - "cross_segment" (default): if the individual has >=2 segments, the pair
+      is two distinct (augmented) segments; if only 1 (e.g. every FredPrior
+      patient), the pair falls back to that one segment augmented twice --
+      standard SimCLR-style fallback, so no individual is dropped.
+    - "within_segment": always the same single segment for both views (two
+      independent augment_waveform draws), regardless of how many segments
+      the individual has -- classic SimCLR instance discrimination, isolating
+      pure augmentation-invariance from any cross-segment invariance pressure.
+    """
 
     def __init__(self, individuals: List[Individual], data_cfg: DataHParams, augment_cfg: AugmentHParams):
+        if data_cfg.pair_mode not in PAIR_MODES:
+            raise ValueError(f"Unknown data.pair_mode: {data_cfg.pair_mode!r}, expected one of {PAIR_MODES}")
         self.individuals = individuals
         self.data_cfg = data_cfg
         self.augment_cfg = augment_cfg
@@ -144,7 +157,9 @@ class IndividualPairDataset(Dataset):
 
     def __getitem__(self, idx: int):
         ind = self.individuals[idx]
-        if len(ind.paths) >= 2:
+        if self.data_cfg.pair_mode == "within_segment":
+            p1 = p2 = random.choice(ind.paths)
+        elif len(ind.paths) >= 2:
             p1, p2 = random.sample(ind.paths, 2)
         else:
             p1 = p2 = ind.paths[0]

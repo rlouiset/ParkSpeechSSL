@@ -78,6 +78,18 @@ class DataHParams:
     # Set to None to disable.
     target_lufs: Optional[float] = -23.0
     num_workers: int = 8
+    # "cross_segment" (default): each individual's contrastive pair is two *distinct*
+    #   segments/recordings when >=2 exist (random.sample), falling back to the same
+    #   segment augmented twice only for individuals with a single segment (e.g. every
+    #   FredPrior patient). Pushes the encoder toward invariance across different
+    #   utterances/recordings of the same subject, on top of augmentation invariance.
+    # "within_segment": classic SimCLR instance discrimination -- always the *same*
+    #   single segment for both views (two independent augment_waveform draws), even
+    #   for individuals with multiple segments. Isolates pure augmentation-invariance
+    #   (recording condition: noise/gain/reverb/bandwidth) and drops the cross-segment
+    #   invariance pressure entirely -- useful as an ablation against "cross_segment".
+    # validated at runtime in data.py (IndividualPairDataset.PAIR_MODES).
+    pair_mode: str = "cross_segment"
 
 
 @dataclass
