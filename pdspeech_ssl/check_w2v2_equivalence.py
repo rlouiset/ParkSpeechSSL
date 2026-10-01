@@ -63,20 +63,35 @@ def main(path: str) -> None:
     mask = torch.from_numpy(mask_np).cuda().bool()
     negatives = torch.from_numpy(neg_np).cuda().long()
 
+    def rel_diffs(a, b):
+        # per-param ||ga - gb|| / ||ga||, worst first
+        return sorted(
+            (((a[n] - b[n]).float().norm() / a[n].float().norm().clamp_min(1e-30)).item(), n,
+             a[n].float().norm().item())
+            for n in a
+        )[::-1]
+
+    HFQ, MyQ = Wav2Vec2GumbelVectorQuantizer, _MemoryEfficientGumbelQuantizer
     for train_quantizer in (False, True):
         model.quantizer.train(train_quantizer)
-        ref = _run(model, wav, attn, mask, negatives, Wav2Vec2GumbelVectorQuantizer, ours=False)
-        new = _run(model, wav, attn, mask, negatives, _MemoryEfficientGumbelQuantizer, ours=True)
-        max_grad_rel = max(
-            ((ref[2][n] - new[2][n]).abs().max() / ref[2][n].abs().max().clamp_min(1e-12)).item()
-            for n in ref[2]
-        )
-        print(
-            f"quantizer {'train' if train_quantizer else 'eval '}: "
-            f"contrastive {ref[0].item():.6f} vs {new[0].item():.6f} | "
-            f"diversity {ref[1].item():.6f} vs {new[1].item():.6f} | "
-            f"same grad params: {ref[2].keys() == new[2].keys()} | max rel grad diff {max_grad_rel:.2e}"
-        )
+        mode = "train" if train_quantizer else "eval"
+        ref = _run(model, wav, attn, mask, negatives, HFQ, ours=False)
+        runs = {
+            "HF rerun (noise baseline)": _run(model, wav, attn, mask, negatives, HFQ, ours=False),
+            "our quantizer + HF loss": _run(model, wav, attn, mask, negatives, MyQ, ours=False),
+            "HF quantizer + our loss": _run(model, wav, attn, mask, negatives, HFQ, ours=True),
+            "ours (both)": _run(model, wav, attn, mask, negatives, MyQ, ours=True),
+        }
+        print(f"\n=== quantizer {mode} ===")
+        for name, new in runs.items():
+            worst = rel_diffs(ref[2], new[2])
+            print(
+                f"{name:28s} contrastive {ref[0].item():.6f} vs {new[0].item():.6f} | "
+                f"diversity {ref[1].item():.6f} vs {new[1].item():.6f} | "
+                f"same grad params: {ref[2].keys() == new[2].keys()}"
+            )
+            for d, n, norm in worst[:3]:
+                print(f"    rel grad diff {d:.2e}  (|g_ref|={norm:.3e})  {n}")
 
 
 if __name__ == "__main__":
