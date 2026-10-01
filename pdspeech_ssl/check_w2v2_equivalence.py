@@ -64,11 +64,14 @@ def main(path: str) -> None:
     negatives = torch.from_numpy(neg_np).cuda().long()
 
     def rel_diffs(a, b):
-        # per-param ||ga - gb|| / ||ga||, worst first
+        # per-param ||ga - gb|| / ||ga||, worst first. Skips attention k_proj biases: their
+        # true gradient is exactly 0 (a shared key offset shifts every score in a softmax
+        # row by the same q.b), so what's measured there is pure rounding noise.
         return sorted(
             (((a[n] - b[n]).float().norm() / a[n].float().norm().clamp_min(1e-30)).item(), n,
              a[n].float().norm().item())
             for n in a
+            if not n.endswith("k_proj.bias")
         )[::-1]
 
     HFQ, MyQ = Wav2Vec2GumbelVectorQuantizer, _MemoryEfficientGumbelQuantizer
