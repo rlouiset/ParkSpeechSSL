@@ -54,13 +54,23 @@ class SSLLightningModule(pl.LightningModule):
                 "frozen, so the w2v2 loss has nothing to train. Set w2v2.weight=0 or use "
                 "trainable_mode='full'."
             )
+        if cfg.loss.hc_vs_rest_hinge_weight > 0 and cfg.training.objective != "simclr":
+            raise ValueError(
+                "loss.hc_vs_rest_hinge_weight > 0 is an auxiliary term on top of training.objective=simclr, "
+                f"got objective={cfg.training.objective!r}."
+            )
         self.cfg = cfg
         self.model = SSLEncoder(cfg.encoder, cfg.model, cfg.w2v2)
-        # cls_head only exists for the hc_vs_rest_bce objective -- keeping it out of the
-        # graph entirely under simclr (rather than just unused) avoids padding DDP's
-        # unused-parameter bookkeeping and the checkpoint with dead weights every step.
-        self.cls_head = nn.Linear(cfg.model.d_emb, 1) if cfg.training.objective == "hc_vs_rest_bce" else None
+        # cls_head only exists for the hc_vs_rest_bce objective or the auxiliary hinge --
+        # keeping it out of the graph entirely otherwise (rather than just unused) avoids
+        # padding DDP's unused-parameter bookkeeping and the checkpoint with dead weights.
+        needs_cls_head = cfg.training.objective == "hc_vs_rest_bce" or self._use_hinge
+        self.cls_head = nn.Linear(cfg.model.d_emb, 1) if needs_cls_head else None
         self.bce = nn.BCEWithLogitsLoss() if cfg.training.objective == "hc_vs_rest_bce" else None
+
+    @property
+    def _use_hinge(self) -> bool:
+        return self.cfg.loss.hc_vs_rest_hinge_weight > 0
 
     @property
     def _use_w2v2(self) -> bool:
@@ -98,6 +108,17 @@ class SSLLightningModule(pl.LightningModule):
         logit2 = self.cls_head(out2["embd"]).squeeze(-1)
         return 0.5 * (self.bce(logit1, targets) + self.bce(logit2, targets))
 
+    def _hinge_loss(self, out1: SSLOutput, out2: SSLOutput, batch: PairBatch) -> torch.Tensor:
+        """Auxiliary HC-vs-rest hinge: max(0, margin - y * logit), y = -1 HC / +1 rest,
+        averaged over individuals and over both views."""
+        y = 2.0 * _hc_vs_rest_targets(batch["labels"], self.device) - 1.0
+        margin = self.cfg.loss.hc_vs_rest_hinge_margin
+        losses = [
+            nn.functional.relu(margin - y * self.cls_head(out["embd"]).squeeze(-1)).mean()
+            for out in (out1, out2)
+        ]
+        return 0.5 * (losses[0] + losses[1])
+
     def _objective_loss(self, out1: SSLOutput, out2: SSLOutput, batch: PairBatch) -> torch.Tensor:
         if self.cfg.training.objective == "simclr":
             return self._contrastive_loss(out1, out2)
@@ -112,7 +133,8 @@ class SSLLightningModule(pl.LightningModule):
         return "hc_vs_rest_bce"
 
     def _step(self, batch: PairBatch, stage: str) -> torch.Tensor:
-        """total = loss.simclr_weight * objective_loss + w2v2.weight * mean_over_views(w2v2_loss).
+        """total = loss.simclr_weight * objective_loss + w2v2.weight * mean_over_views(w2v2_loss)
+        + loss.hc_vs_rest_hinge_weight * hc_vs_rest_hinge.
         Validation runs the same masked procedure (explicit masks still apply in eval
         mode since apply_spec_augment=True), just without dropout."""
         out1 = self._embed_view(batch["view1"], batch["len1"])
@@ -124,6 +146,11 @@ class SSLLightningModule(pl.LightningModule):
         is_train = stage == "Train"
         log_kwargs = dict(on_step=is_train, on_epoch=True, sync_dist=True, batch_size=batch["view1"].shape[0])
         self.log(f"{stage}/{self._loss_metric_name}", objective_loss, **log_kwargs)
+
+        if self._use_hinge:
+            hinge = self._hinge_loss(out1, out2, batch)
+            total = total + self.cfg.loss.hc_vs_rest_hinge_weight * hinge
+            self.log(f"{stage}/hc_vs_rest_hinge", hinge, **log_kwargs)
 
         if self._use_w2v2:
             w2v2_terms = {k: 0.5 * (out1[k] + out2[k]) for k in W2V2_KEYS}

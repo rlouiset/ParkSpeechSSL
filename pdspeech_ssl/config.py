@@ -106,6 +106,12 @@ class LossHParams:
     # weight of the training.objective loss (simclr / hc_vs_rest_bce) in the total loss:
     # total = simclr_weight * objective_loss + w2v2.weight * w2v2_loss
     simclr_weight: float = 1.0
+    # Auxiliary supervised HC-vs-rest (PD/MSA/PSP/DYS) hinge loss on a linear cls_head over
+    # embd, added on top of training.objective=simclr:
+    #   + hc_vs_rest_hinge_weight * mean_over_views(max(0, margin - y * logit)), y = -1 HC / +1 rest.
+    # 0 disables it (no cls_head is built).
+    hc_vs_rest_hinge_weight: float = 0.0
+    hc_vs_rest_hinge_margin: float = 1.0
 
 
 @dataclass
