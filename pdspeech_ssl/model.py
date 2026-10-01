@@ -180,13 +180,17 @@ def _build_wav2vec2(enc_cfg: EncoderHParams, w2v2_cfg: W2V2HParams) -> Wav2Vec2F
         num_negatives=w2v2_cfg.num_negatives,
         diversity_loss_weight=w2v2_cfg.diversity_loss_weight,
     )
+    # Only the w2v2 loss needs the pretraining heads / mask embedding. With w2v2.weight == 0
+    # a fine-tuned checkpoint (e.g. wav2vec2-xlsr-53-espeak-cv-ft) is fine: its missing
+    # quantizer/project_q/project_hid are randomly initialized but never used.
+    use_w2v2 = w2v2_cfg.weight > 0
     missing_heads = [k for k in loading_info["missing_keys"] if k.startswith(_PRETRAINING_HEAD_PREFIXES)]
-    if missing_heads:
+    if use_w2v2 and missing_heads:
         raise ValueError(
             f"{enc_cfg.model_name_or_path} is missing wav2vec2 pretraining weights {missing_heads} -- "
             "it must be a pretraining checkpoint (e.g. wav2vec2-large-xlsr-53), not a fine-tuned one."
         )
-    if not hasattr(model.wav2vec2, "masked_spec_embed"):
+    if use_w2v2 and not hasattr(model.wav2vec2, "masked_spec_embed"):
         raise ValueError(
             f"{enc_cfg.model_name_or_path}'s config has mask_time_prob == mask_feature_prob == 0, so HF "
             "never built masked_spec_embed, which the explicit-mask w2v2 forward needs."
