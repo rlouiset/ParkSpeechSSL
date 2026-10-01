@@ -112,6 +112,11 @@ class LossHParams:
     # 0 disables it (no cls_head is built).
     hc_vs_rest_hinge_weight: float = 0.0
     hc_vs_rest_hinge_margin: float = 1.0
+    # Hinge only: logit = s * cos(w, embd) (no bias) instead of a plain linear w.embd + b, so
+    # the margin can't be met by just inflating ||embd|| / ||w||. The effective margin in
+    # cosine units is hc_vs_rest_hinge_margin / hc_vs_rest_hinge_scale (default 1/5 = 0.2).
+    hc_vs_rest_hinge_cosine: bool = False
+    hc_vs_rest_hinge_scale: float = 5.0
 
 
 @dataclass

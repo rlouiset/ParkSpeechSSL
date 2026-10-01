@@ -59,13 +59,21 @@ class SSLLightningModule(pl.LightningModule):
                 "loss.hc_vs_rest_hinge_weight > 0 is an auxiliary term on top of training.objective=simclr, "
                 f"got objective={cfg.training.objective!r}."
             )
+        if cfg.loss.hc_vs_rest_hinge_cosine and cfg.loss.hc_vs_rest_hinge_weight <= 0:
+            raise ValueError(
+                "loss.hc_vs_rest_hinge_cosine only applies to the hinge loss; "
+                "set loss.hc_vs_rest_hinge_weight > 0 too."
+            )
         self.cfg = cfg
         self.model = SSLEncoder(cfg.encoder, cfg.model, cfg.w2v2)
         # cls_head only exists for the hc_vs_rest_bce objective or the auxiliary hinge --
         # keeping it out of the graph entirely otherwise (rather than just unused) avoids
         # padding DDP's unused-parameter bookkeeping and the checkpoint with dead weights.
         needs_cls_head = cfg.training.objective == "hc_vs_rest_bce" or self._use_hinge
-        self.cls_head = nn.Linear(cfg.model.d_emb, 1) if needs_cls_head else None
+        # cosine hinge: logit = s * cos(w, embd), a bias would be unused
+        self.cls_head = (
+            nn.Linear(cfg.model.d_emb, 1, bias=not cfg.loss.hc_vs_rest_hinge_cosine) if needs_cls_head else None
+        )
         self.bce = nn.BCEWithLogitsLoss() if cfg.training.objective == "hc_vs_rest_bce" else None
 
     @property
@@ -108,15 +116,18 @@ class SSLLightningModule(pl.LightningModule):
         logit2 = self.cls_head(out2["embd"]).squeeze(-1)
         return 0.5 * (self.bce(logit1, targets) + self.bce(logit2, targets))
 
+    def _hinge_logit(self, embd: torch.Tensor) -> torch.Tensor:
+        if not self.cfg.loss.hc_vs_rest_hinge_cosine:
+            return self.cls_head(embd).squeeze(-1)
+        cos = nn.functional.normalize(embd, dim=-1) @ nn.functional.normalize(self.cls_head.weight, dim=-1).T
+        return self.cfg.loss.hc_vs_rest_hinge_scale * cos.squeeze(-1)
+
     def _hinge_loss(self, out1: SSLOutput, out2: SSLOutput, batch: PairBatch) -> torch.Tensor:
         """Auxiliary HC-vs-rest hinge: max(0, margin - y * logit), y = -1 HC / +1 rest,
-        averaged over individuals and over both views."""
+        averaged over individuals and over both views (logit: see _hinge_logit)."""
         y = 2.0 * _hc_vs_rest_targets(batch["labels"], self.device) - 1.0
         margin = self.cfg.loss.hc_vs_rest_hinge_margin
-        losses = [
-            nn.functional.relu(margin - y * self.cls_head(out["embd"]).squeeze(-1)).mean()
-            for out in (out1, out2)
-        ]
+        losses = [nn.functional.relu(margin - y * self._hinge_logit(out["embd"])).mean() for out in (out1, out2)]
         return 0.5 * (losses[0] + losses[1])
 
     def _objective_loss(self, out1: SSLOutput, out2: SSLOutput, batch: PairBatch) -> torch.Tensor:
