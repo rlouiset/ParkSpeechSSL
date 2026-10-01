@@ -212,6 +212,10 @@ def _build_wav2vec2(enc_cfg: EncoderHParams, w2v2_cfg: W2V2HParams) -> Wav2Vec2F
         else:
             for p in [*model.quantizer.parameters(), *model.project_q.parameters()]:
                 p.requires_grad = False
+        if enc_cfg.gradient_checkpointing:
+            # non-reentrant: plays well with DDP(find_unused_parameters=True) and with
+            # inputs that don't require grad (the CNN feature encoder is frozen)
+            model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
     return model
 

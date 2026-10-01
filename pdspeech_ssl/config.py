@@ -19,6 +19,10 @@ class EncoderHParams:
     #   wav2vec2 fine-tuning); quantizer/project_q follow W2V2HParams.train_quantizer.
     # validated at runtime in model.py.
     trainable_mode: str = "full"
+    # Recompute Transformer-layer activations in backward instead of storing them:
+    # same results (dropout RNG is replayed), much less memory, ~30% slower step.
+    # Needed for w2v2.simclr_view=unmasked (4 backbone graphs alive per step).
+    gradient_checkpointing: bool = False
 
 
 @dataclass
