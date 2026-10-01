@@ -21,6 +21,9 @@ conda activate py39  # must have: torch, torchaudio, lightning, wandb, transform
                      # soundfile, scikit-learn, hydra-core, omegaconf, pyloudnorm installed
 
 export WANDB_MODE=offline
+# variable-length padded batches fragment the CUDA cache (~16 GiB reserved-but-unallocated
+# seen at OOM time); expandable segments let freed blocks be reused across sizes.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export HF_HOME=$WORK/hf_cache  # must match the HF_HOME used to pre-download the checkpoint on the login node
 export HF_HUB_OFFLINE=1  # set to 0 for the very first run so wav2vec2-xlsr-53 can download;
                           # once cached in $HF_HOME, flip back to 1 for offline compute nodes

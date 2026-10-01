@@ -133,6 +133,39 @@ class _MemoryEfficientGumbelQuantizer(Wav2Vec2GumbelVectorQuantizer):
         return codevectors.reshape(batch_size, sequence_length, -1), perplexity
 
 
+def _w2v2_pretraining_loss(
+    config,
+    transformer_features: torch.Tensor,  # (B, T, D) projected_states
+    quantized_features: torch.Tensor,  # (B, T, D) projected_quantized_states
+    codevector_perplexity: torch.Tensor,
+    mask: torch.Tensor,  # (B, T) bool
+    negatives: torch.Tensor,  # (B, T, K) indices into the flattened (B*T) frames
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Wav2Vec2ForPreTraining's (summed) contrastive + diversity losses, restricted to
+    masked frames. HF builds the (K+1, B, T, D) fp32 target tensor for *every* frame and
+    then drops the unmasked ones via target=-100 (~4.6 GiB per copy at B=16, 20s, K=100);
+    same formula here, just indexed to the masked frames first."""
+    hidden_size = quantized_features.shape[-1]
+    positive = quantized_features[mask]  # (M, D)
+    negative = quantized_features.reshape(-1, hidden_size)[negatives[mask]]  # (M, K, D)
+    targets = torch.cat([positive[:, None], negative], dim=1)  # (M, K+1, D)
+
+    logits = torch.cosine_similarity(
+        transformer_features[mask].float()[:, None], targets.float(), dim=-1
+    ).type_as(targets)
+    logits = logits / config.contrastive_logits_temperature
+    neg_is_pos = (positive[:, None] == negative).all(-1)  # (M, K)
+    if neg_is_pos.any():
+        logits[:, 1:][neg_is_pos] = float("-inf")
+
+    target = torch.zeros(logits.shape[0], dtype=torch.long, device=logits.device)
+    contrastive = nn.functional.cross_entropy(logits.float(), target, reduction="sum")
+
+    num_codevectors = config.num_codevectors_per_group * config.num_codevector_groups
+    diversity = ((num_codevectors - codevector_perplexity) / num_codevectors) * mask.sum()
+    return contrastive, diversity
+
+
 def _build_wav2vec2(enc_cfg: EncoderHParams, w2v2_cfg: W2V2HParams) -> Wav2Vec2ForPreTraining:
     if enc_cfg.trainable_mode not in TRAINABLE_MODES:
         raise ValueError(f"Unknown trainable_mode: {enc_cfg.trainable_mode!r}, expected one of {TRAINABLE_MODES}")
@@ -309,20 +342,28 @@ class SSLEncoder(nn.Module):
         mask = torch.from_numpy(mask_np).to(device=input_values.device, dtype=torch.bool)
         negatives = torch.from_numpy(negatives_np).to(device=input_values.device, dtype=torch.long)
 
+        # no sampled_negative_indices => HF skips its own loss, computed below on masked frames only
         out = self._w2v2_base(
             input_values,
             attention_mask=attention_mask,
             mask_time_indices=mask,
-            sampled_negative_indices=negatives,
             output_hidden_states=True,
             return_dict=True,
+        )
+        contrastive, diversity = _w2v2_pretraining_loss(
+            self._w2v2_base.config,
+            out.projected_states,
+            out.projected_quantized_states,
+            out.codevector_perplexity,
+            mask,
+            negatives,
         )
         # HF sums the contrastive/diversity losses over masked frames
         n = mask.sum()
         losses = {
-            "w2v2_loss": out.loss / n,
-            "w2v2_contrastive": out.contrastive_loss / n,
-            "w2v2_diversity": out.diversity_loss / n,
+            "w2v2_loss": (contrastive + self._w2v2_base.config.diversity_loss_weight * diversity) / n,
+            "w2v2_contrastive": contrastive / n,
+            "w2v2_diversity": diversity / n,
             "codevector_perplexity": out.codevector_perplexity,
         }
         return out.hidden_states, losses
