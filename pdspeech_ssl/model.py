@@ -5,7 +5,11 @@ from typing import TypedDict
 import torch
 import torch.nn as nn
 from transformers import Wav2Vec2ForPreTraining
-from transformers.models.wav2vec2.modeling_wav2vec2 import _compute_mask_indices, _sample_negative_indices
+from transformers.models.wav2vec2.modeling_wav2vec2 import (
+    Wav2Vec2GumbelVectorQuantizer,
+    _compute_mask_indices,
+    _sample_negative_indices,
+)
 
 from pdspeech_ssl.augment import feature_time_mask
 from pdspeech_ssl.config import AugmentHParams, EncoderHParams, ModelHParams, W2V2HParams
@@ -98,6 +102,37 @@ class BiLSTMEncoder(nn.Module):
         return x  # (B, T, 2*d_model)
 
 
+class _MemoryEfficientGumbelQuantizer(Wav2Vec2GumbelVectorQuantizer):
+    """Same outputs as HF's quantizer, without its dense (B*T, G*V, D/G) intermediate
+    (`codevector_probs.unsqueeze(-1) * self.codevectors`, ~1 MB/frame for XLSR-53:
+    ~14 GiB for a 16 x 10s batch). Eval: exact gather of the argmax codevectors.
+    Train: HF's exact ops (no matmul, so unaffected by float32_matmul_precision),
+    just run over chunks of frames to cap the intermediate at ~0.5 GiB."""
+
+    _CHUNK_FRAMES = 512
+
+    def forward(self, hidden_states: torch.Tensor, mask_time_indices: torch.Tensor | None = None):
+        batch_size, sequence_length, _ = hidden_states.shape
+        G, V = self.num_groups, self.num_vars
+        logits = self.weight_proj(hidden_states).view(batch_size * sequence_length, G, V)
+        codebook = self.codevectors.view(G, V, -1)  # (G, V, D/G)
+
+        if self.training:
+            codevector_probs = nn.functional.gumbel_softmax(logits.float(), tau=self.temperature, hard=True).type_as(logits)
+            perplexity = self._compute_perplexity(torch.softmax(logits.float(), dim=-1), mask_time_indices)
+            codevectors = torch.cat([
+                (p.reshape(p.shape[0], -1).unsqueeze(-1) * self.codevectors).view(p.shape[0], G, V, -1).sum(-2)
+                for p in codevector_probs.split(self._CHUNK_FRAMES)
+            ])
+        else:
+            codevector_idx = logits.argmax(dim=-1)  # (N, G)
+            codevector_probs = torch.zeros_like(logits).scatter_(-1, codevector_idx.unsqueeze(-1), 1.0)
+            perplexity = self._compute_perplexity(codevector_probs, mask_time_indices)
+            codevectors = codebook[torch.arange(G, device=logits.device), codevector_idx]  # (N, G, D/G)
+
+        return codevectors.reshape(batch_size, sequence_length, -1), perplexity
+
+
 def _build_wav2vec2(enc_cfg: EncoderHParams, w2v2_cfg: W2V2HParams) -> Wav2Vec2ForPreTraining:
     if enc_cfg.trainable_mode not in TRAINABLE_MODES:
         raise ValueError(f"Unknown trainable_mode: {enc_cfg.trainable_mode!r}, expected one of {TRAINABLE_MODES}")
@@ -129,6 +164,8 @@ def _build_wav2vec2(enc_cfg: EncoderHParams, w2v2_cfg: W2V2HParams) -> Wav2Vec2F
     # overriding them to 0 at load time would drop the pretrained mask embedding.
     model.config.mask_time_prob = 0.0
     model.config.mask_feature_prob = 0.0
+    # same module/weights, memory-efficient forward (see _MemoryEfficientGumbelQuantizer)
+    model.quantizer.__class__ = _MemoryEfficientGumbelQuantizer
 
     if enc_cfg.trainable_mode == "frozen":
         for p in model.parameters():
