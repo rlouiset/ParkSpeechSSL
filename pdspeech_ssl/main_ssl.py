@@ -45,9 +45,10 @@ def main(cfg: HParams) -> None:
     )
 
     # find_unused_parameters=True: training_step calls self.model(...) twice per step
-    # (once per contrastive view), and with LoRA freezing most of wav2vec2, the two
-    # calls' autograd graphs don't always touch an identical set of trainable params --
-    # plain strategy="ddp" (find_unused_parameters=False) crashes on that mismatch.
+    # (once per contrastive view), and the two calls' autograd graphs don't always touch
+    # an identical set of trainable params -- plain strategy="ddp"
+    # (find_unused_parameters=False) crashed on that mismatch. Also needed when
+    # w2v2.weight=0: project_hid / masked_spec_embed are trainable but never used then.
     strategy = DDPStrategy(find_unused_parameters=True) if cfg.training.strategy == "ddp" else cfg.training.strategy
 
     trainer = pl.Trainer(
@@ -60,7 +61,8 @@ def main(cfg: HParams) -> None:
         limit_train_batches=cfg.training.limit_train_batches,
         limit_val_batches=cfg.training.limit_val_batches,
         logger=wandb_logger,
-        callbacks=[checkpoint_cb],
+        callbacks=[checkpoint_cb, LearningRateMonitor(logging_interval="step")],
+        gradient_clip_val=cfg.training.gradient_clip_val,
         check_val_every_n_epoch=1,
     )
 

@@ -4,16 +4,30 @@ from typing import TypedDict
 
 import torch
 import torch.nn as nn
-from peft import LoraConfig, get_peft_model
-from transformers import Wav2Vec2FeatureExtractor, Wav2Vec2Model
+from transformers import Wav2Vec2ForPreTraining
+from transformers.models.wav2vec2.modeling_wav2vec2 import _compute_mask_indices, _sample_negative_indices
 
 from pdspeech_ssl.augment import feature_time_mask
-from pdspeech_ssl.config import AugmentHParams, EncoderHParams, ModelHParams
+from pdspeech_ssl.config import AugmentHParams, EncoderHParams, ModelHParams, W2V2HParams
+
+TRAINABLE_MODES = ("frozen", "full")
+LAYER_AGGREGATIONS = ("last", "weighted")
+# heads Wav2Vec2ForPreTraining needs for the w2v2 loss -- must come from the checkpoint,
+# a randomly initialized quantizer/project_q would make the targets meaningless.
+_PRETRAINING_HEAD_PREFIXES = ("quantizer", "project_q", "project_hid")
 
 
-class SSLOutput(TypedDict):
+class _SSLOutputBase(TypedDict):
     embd: torch.Tensor  # (B, d_emb)
     proj: torch.Tensor  # (B, proj_head_dim)
+
+
+class SSLOutput(_SSLOutputBase, total=False):
+    # only present for a w2v2_mask=True forward; losses are per masked frame
+    w2v2_loss: torch.Tensor  # contrastive + diversity_loss_weight * diversity
+    w2v2_contrastive: torch.Tensor
+    w2v2_diversity: torch.Tensor
+    codevector_perplexity: torch.Tensor
 
 
 class SelfAttentionPooling(nn.Module):
@@ -84,54 +98,52 @@ class BiLSTMEncoder(nn.Module):
         return x  # (B, T, 2*d_model)
 
 
-def _build_wav2vec2(
-    enc_cfg: EncoderHParams,
-) -> tuple[Wav2Vec2Model, Wav2Vec2FeatureExtractor]:
+def _build_wav2vec2(enc_cfg: EncoderHParams, w2v2_cfg: W2V2HParams) -> Wav2Vec2ForPreTraining:
+    if enc_cfg.trainable_mode not in TRAINABLE_MODES:
+        raise ValueError(f"Unknown trainable_mode: {enc_cfg.trainable_mode!r}, expected one of {TRAINABLE_MODES}")
 
-    model_name = (
-        "/lustre/fswork/projects/rech/haj/uik24xv/"
-        "huggingface/wav2vec2-xlsr-53-espeak-cv-ft"
-    )
-
-    processor = Wav2Vec2FeatureExtractor.from_pretrained(
-        model_name,
+    model, loading_info = Wav2Vec2ForPreTraining.from_pretrained(
+        enc_cfg.model_name_or_path,
+        output_loading_info=True,
         local_files_only=True,
+        layerdrop=0.0,
+        # REQUIRED: if False, HF's _mask_hidden_states also ignores the explicit mask_time_indices
+        apply_spec_augment=True,
+        num_negatives=w2v2_cfg.num_negatives,
+        diversity_loss_weight=w2v2_cfg.diversity_loss_weight,
     )
-
-    model = Wav2Vec2Model.from_pretrained(
-        model_name,
-        output_hidden_states=True,
-        local_files_only=True,
-    )
+    missing_heads = [k for k in loading_info["missing_keys"] if k.startswith(_PRETRAINING_HEAD_PREFIXES)]
+    if missing_heads:
+        raise ValueError(
+            f"{enc_cfg.model_name_or_path} is missing wav2vec2 pretraining weights {missing_heads} -- "
+            "it must be a pretraining checkpoint (e.g. wav2vec2-large-xlsr-53), not a fine-tuned one."
+        )
+    if not hasattr(model.wav2vec2, "masked_spec_embed"):
+        raise ValueError(
+            f"{enc_cfg.model_name_or_path}'s config has mask_time_prob == mask_feature_prob == 0, so HF "
+            "never built masked_spec_embed, which the explicit-mask w2v2 forward needs."
+        )
+    # No HF-internal random masking: masks are passed explicitly (SSLEncoder.forward).
+    # Zeroed here, *after* loading, rather than passed as from_pretrained overrides:
+    # Wav2Vec2Model only creates masked_spec_embed when one of them is > 0 at init, so
+    # overriding them to 0 at load time would drop the pretrained mask embedding.
+    model.config.mask_time_prob = 0.0
+    model.config.mask_feature_prob = 0.0
 
     if enc_cfg.trainable_mode == "frozen":
         for p in model.parameters():
             p.requires_grad = False
-
-    elif enc_cfg.trainable_mode == "lora":
-        for p in model.parameters():
-            p.requires_grad = False
-
-        lora_cfg = LoraConfig(
-            r=enc_cfg.lora_r,
-            lora_alpha=enc_cfg.lora_alpha,
-            lora_dropout=enc_cfg.lora_dropout,
-            target_modules=enc_cfg.lora_target_modules,
-            bias="none",
-        )
-        model = get_peft_model(model, lora_cfg)
-        model.print_trainable_parameters()
-
-    elif enc_cfg.trainable_mode == "full":
+    else:  # "full"
         for p in model.parameters():
             p.requires_grad = True
+        model.freeze_feature_encoder()  # CNN feature encoder always frozen
+        if w2v2_cfg.train_quantizer:
+            model.set_gumbel_temperature(w2v2_cfg.gumbel_temperature)
+        else:
+            for p in [*model.quantizer.parameters(), *model.project_q.parameters()]:
+                p.requires_grad = False
 
-    else:
-        raise ValueError(
-            f"Unknown trainable_mode: {enc_cfg.trainable_mode}"
-        )
-
-    return model, processor
+    return model
 
 
 class SSLEncoder(nn.Module):
@@ -140,15 +152,33 @@ class SSLEncoder(nn.Module):
         self,
         encoder_cfg: EncoderHParams,
         model_cfg: ModelHParams,
+        w2v2_cfg: W2V2HParams,
         sample_rate: int = 16_000,
     ):
         super().__init__()
+        if model_cfg.layer_aggregation not in LAYER_AGGREGATIONS:
+            raise ValueError(
+                f"Unknown model.layer_aggregation: {model_cfg.layer_aggregation!r}, expected one of {LAYER_AGGREGATIONS}"
+            )
 
         self.model_cfg = model_cfg
+        self.w2v2_cfg = w2v2_cfg
+        self.trainable_mode = encoder_cfg.trainable_mode
         self.sample_rate = sample_rate
 
-        self.wav2vec2, self.processor = _build_wav2vec2(encoder_cfg)
-        wav2vec_dim = self.wav2vec2.config.hidden_size
+        # HF model kept whole: .wav2vec2 (inner encoder), .quantizer, .project_q/.project_hid,
+        # plus the length/attention-mask helpers used in forward.
+        self._w2v2_base = _build_wav2vec2(encoder_cfg, w2v2_cfg)
+        w2v2_config = self._w2v2_base.config
+        wav2vec_dim = w2v2_config.hidden_size
+
+        # one weight per hidden state (feature projection output + each Transformer layer);
+        # zeros => uniform softmax at init
+        self.layer_weights = (
+            nn.Parameter(torch.zeros(w2v2_config.num_hidden_layers + 1))
+            if model_cfg.layer_aggregation == "weighted"
+            else None
+        )
 
         self.projector = (
             nn.Linear(wav2vec_dim, model_cfg.d_proj)
@@ -183,64 +213,112 @@ class SSLEncoder(nn.Module):
             nn.Linear(model_cfg.d_emb, model_cfg.proj_head_dim),
         )
 
-    def encode_frames(
-        self,
+    def train(self, mode: bool = True) -> "SSLEncoder":
+        super().train(mode)
+        if self.trainable_mode == "frozen":
+            self._w2v2_base.eval()  # no dropout in a backbone that isn't being trained
+        elif not self.w2v2_cfg.train_quantizer:
+            # HF's quantizer samples with Gumbel noise whenever it's in train mode;
+            # eval mode => argmax codevectors, i.e. deterministic w2v2 targets.
+            self._w2v2_base.quantizer.eval()
+        return self
+
+    def layer_weight_probs(self) -> torch.Tensor | None:
+        return torch.softmax(self.layer_weights, dim=0) if self.layer_weights is not None else None
+
+    @staticmethod
+    def _normalize_waveforms(
         waveforms: torch.Tensor,
         sample_lengths: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return Wav2Vec2 features as (B, T_frames, H) and lengths."""
+        """Batched, on-device equivalent of Wav2Vec2FeatureExtractor(do_normalize=True):
+        per-utterance zero-mean/unit-variance over the valid samples only, padding
+        zeroed. Returns (input_values (B, L), attention_mask (B, L) long)."""
+        L = waveforms.shape[1]
+        sample_lengths = sample_lengths.to(waveforms.device)
+        attention_mask = (torch.arange(L, device=waveforms.device)[None, :] < sample_lengths[:, None]).long()
 
-        features = []
+        valid = attention_mask.to(torch.float32)
+        x = waveforms.to(torch.float32)
+        n = valid.sum(dim=1, keepdim=True).clamp_min(1.0)
+        mean = (x * valid).sum(dim=1, keepdim=True) / n
+        var = (((x - mean) * valid) ** 2).sum(dim=1, keepdim=True) / n
+        x = (x - mean) / torch.sqrt(var + 1e-7) * valid
+        return x, attention_mask
 
-        for wav, length in zip(waveforms, sample_lengths):
-            wav = wav[: int(length)].detach().cpu().numpy()
-
-            inputs = self.processor(
-                wav,
-                sampling_rate=self.sample_rate,
-                return_tensors="pt",
-            )
-
-            input_values = inputs.input_values.to(waveforms.device)
-
-            attention_mask = getattr(inputs, "attention_mask", None)
-            if attention_mask is not None:
-                attention_mask = attention_mask.to(waveforms.device)
-
-            with torch.set_grad_enabled(
-                any(p.requires_grad for p in self.wav2vec2.parameters())
-            ):
-                outputs = self.wav2vec2(
-                    input_values=input_values,
-                    attention_mask=attention_mask,
-                )
-
-            features.append(outputs.last_hidden_state.squeeze(0))
-
-        lengths = torch.tensor(
-            [x.shape[0] for x in features],
-            dtype=torch.long,
-            device=waveforms.device,
+    def _w2v2_masked_forward(
+        self,
+        input_values: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> tuple[tuple[torch.Tensor, ...], dict[str, torch.Tensor]]:
+        """Wav2Vec2ForPreTraining forward with explicit span masks + within-utterance
+        negatives. Returns (hidden_states, w2v2 loss terms normalized per masked frame)."""
+        batch_size = input_values.shape[0]
+        num_frames = int(
+            self._w2v2_base._get_feat_extract_output_lengths(torch.tensor(input_values.shape[1]))
         )
+        sub_attention_mask = self._w2v2_base._get_feature_vector_attention_mask(num_frames, attention_mask)
 
-        features = nn.utils.rnn.pad_sequence(
-            features,
-            batch_first=True,
+        mask_np = _compute_mask_indices(
+            (batch_size, num_frames),
+            mask_prob=self.w2v2_cfg.mask_prob,
+            mask_length=self.w2v2_cfg.mask_length,
+            attention_mask=sub_attention_mask,
+            min_masks=self.w2v2_cfg.min_masks,
         )
+        negatives_np = _sample_negative_indices(
+            (batch_size, num_frames), self.w2v2_cfg.num_negatives, mask_time_indices=mask_np
+        )
+        mask = torch.from_numpy(mask_np).to(device=input_values.device, dtype=torch.bool)
+        negatives = torch.from_numpy(negatives_np).to(device=input_values.device, dtype=torch.long)
 
-        return features, lengths
+        out = self._w2v2_base(
+            input_values,
+            attention_mask=attention_mask,
+            mask_time_indices=mask,
+            sampled_negative_indices=negatives,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+        # HF sums the contrastive/diversity losses over masked frames
+        n = mask.sum()
+        losses = {
+            "w2v2_loss": out.loss / n,
+            "w2v2_contrastive": out.contrastive_loss / n,
+            "w2v2_diversity": out.diversity_loss / n,
+            "codevector_perplexity": out.codevector_perplexity,
+        }
+        return out.hidden_states, losses
 
     def forward(
         self,
         waveforms: torch.Tensor,
         sample_lengths: torch.Tensor,
         augment_cfg: AugmentHParams | None = None,
+        w2v2_mask: bool = False,
     ) -> SSLOutput:
+        input_values, attention_mask = self._normalize_waveforms(waveforms, sample_lengths)
+        lengths = self._w2v2_base._get_feat_extract_output_lengths(attention_mask.sum(dim=-1)).long()
 
-        X, lengths = self.encode_frames(
-            waveforms,
-            sample_lengths,
-        )  # (B, T, H)
+        out: SSLOutput = {}
+        if w2v2_mask:
+            hidden_states, w2v2_losses = self._w2v2_masked_forward(input_values, attention_mask)
+            out.update(w2v2_losses)
+        else:
+            backbone_trainable = any(p.requires_grad for p in self._w2v2_base.wav2vec2.parameters())
+            with torch.set_grad_enabled(torch.is_grad_enabled() and backbone_trainable):
+                hidden_states = self._w2v2_base.wav2vec2(
+                    input_values,
+                    attention_mask=attention_mask,
+                    output_hidden_states=True,
+                    return_dict=True,
+                ).hidden_states
+
+        if self.layer_weights is not None:
+            weights = self.layer_weight_probs()
+            X = (weights[:, None, None, None] * torch.stack(hidden_states, dim=0)).sum(dim=0)  # (B, T, H)
+        else:
+            X = hidden_states[-1]  # (B, T, H)
 
         if (
             augment_cfg is not None
@@ -275,7 +353,6 @@ class SSLEncoder(nn.Module):
             embd
         )  # (B, proj_head_dim)
 
-        return {
-            "embd": embd,
-            "proj": proj,
-        }
+        out["embd"] = embd
+        out["proj"] = proj
+        return out

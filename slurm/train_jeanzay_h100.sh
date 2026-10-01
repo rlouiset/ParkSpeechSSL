@@ -18,7 +18,7 @@ module purge
 conda deactivate
 module load miniforge/24.9.0
 conda activate py39  # must have: torch, torchaudio, lightning, wandb, transformers==4.53.3,
-                     # peft, soundfile, scikit-learn, hydra-core, omegaconf, pyloudnorm installed
+                     # soundfile, scikit-learn, hydra-core, omegaconf, pyloudnorm installed
 
 export WANDB_MODE=offline
 export HF_HOME=$WORK/hf_cache  # must match the HF_HOME used to pre-download the checkpoint on the login node
@@ -31,8 +31,10 @@ cd "${SLURM_SUBMIT_DIR}"
 # defaults to "default" if not passed. e.g.:
 #   sbatch slurm/train_jeanzay_h100.sh simclr_within_segment
 CONFIG_NAME="${1:-default}"
+# any further args are passed through as Hydra overrides, e.g. a smoke test:
+#   sbatch slurm/train_jeanzay_h100.sh default training.max_epochs=1 training.limit_train_batches=2 training.limit_val_batches=2
 
 # --ntasks-per-node=4 + srun launches 4 processes, one per H100; Lightning's
 # SLURM environment plugin auto-detects rank/world-size from the SLURM env
 # vars, so training.devices=4 with strategy=ddp in the config just works.
-srun python3 -m pdspeech_ssl.main_ssl --config-name="${CONFIG_NAME}"
+srun python3 -m pdspeech_ssl.main_ssl --config-name="${CONFIG_NAME}" "${@:2}"

@@ -1,25 +1,24 @@
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-# note: intentionally `str`, not `typing.Literal` -- omegaconf's structured
-# configs don't support Literal type annotations. Allowed values are
-# "frozen" / "lora" / "full", validated at runtime in model.py.
+# note: intentionally `str`, not `typing.Literal`, for every enum-like field below --
+# omegaconf's structured configs don't support Literal type annotations. Allowed
+# values are listed next to each field and validated at runtime.
 
 
 @dataclass
 class EncoderHParams:
-    # HuggingFace checkpoint. XLSR-53 chosen for multilingual coverage
-    # (our datasets span Italian, Spanish, Czech, Mandarin, English).
-    checkpoint: str = "facebook/wav2vec2-large-xlsr-53"
-    # "frozen": no gradients into wav2vec2 at all.
-    # "lora": base weights frozen, LoRA adapters on attention q/v projections.
-    # "full": every wav2vec2 weight above the CNN feature extractor is trainable
-    #   (the CNN feature extractor is always frozen, standard practice for wav2vec2 fine-tuning).
+    # Local copy of facebook/wav2vec2-large-xlsr-53 (loaded with local_files_only=True).
+    # XLSR-53 chosen for multilingual coverage (our datasets span Italian, Spanish,
+    # Czech, Mandarin, English). Must be the *pretraining* checkpoint (quantizer,
+    # project_q, project_hid present) -- asserted at load time in model.py.
+    model_name_or_path: str = "/lustre/fswork/projects/rech/haj/uik24xv/huggingface/wav2vec2-large-xlsr-53"
+    # "frozen": no gradients into wav2vec2 at all, backbone kept in eval mode.
+    # "full": Transformer, feature_projection, masked_spec_embed and project_hid are
+    #   trainable. The CNN feature encoder is always frozen (standard practice for
+    #   wav2vec2 fine-tuning); quantizer/project_q follow W2V2HParams.train_quantizer.
+    # validated at runtime in model.py.
     trainable_mode: str = "full"
-    lora_r: int = 16
-    lora_alpha: int = 32
-    lora_dropout: float = 0.05
-    lora_target_modules: List[str] = field(default_factory=lambda: ["q_proj", "v_proj"])
 
 
 @dataclass
@@ -30,6 +29,10 @@ class ModelHParams:
     d_emb: int = 32
     dropout: float = 0.2
     proj_head_dim: int = 32  # SimCLR-style projection head output dim (contrastive loss only, not the linear probe)
+    # BiLSTM input: "last" = final wav2vec2 hidden state; "weighted" = softmax-weighted
+    # sum of all hidden states (CNN-projection output + every Transformer layer), with
+    # learnable weights initialized uniform. validated at runtime in model.py.
+    layer_aggregation: str = "weighted"
 
 
 @dataclass
@@ -96,22 +99,44 @@ class DataHParams:
 class LossHParams:
     temperature: float = 0.1
     gather_across_gpus: bool = True
+    # weight of the training.objective loss (simclr / hc_vs_rest_bce) in the total loss:
+    # total = simclr_weight * objective_loss + w2v2.weight * w2v2_loss
+    simclr_weight: float = 1.0
 
 
 @dataclass
-class DiseaseHParams:
-    # Only used when training.objective == "disease_uniformity". Splits the SimCLR-style
-    # proj_head output (dim = ModelHParams.proj_head_dim) into Z_D = proj[:d_disease]
-    # (disease-specific -- forced to 0 for HC individuals) and Z_C = proj[d_disease:]
-    # (shared/common -- age, sex, smoking, recording condition, etc, unconstrained).
-    # Must be < proj_head_dim.
-    d_disease: int = 8
-    leaky_slope: float = 0.2  # applied to the Z_D block only, before the final renormalize --
-    # keeps disease deviation mostly one-sided so HC (pinned at Z_D=0) can't end up
-    # geometrically "between" two disease subgroups spread into opposing directions.
-    uniformity_t: float = 2.0  # Wang & Isola's default
-    align_weight: float = 1.0
-    uniform_weight: float = 1.0
+class W2V2HParams:
+    # wav2vec2 masked-prediction pretraining loss, trained jointly with training.objective.
+    weight: float = 1.0  # 0 disables the w2v2 loss entirely (no masking, no quantizer forward)
+    # span masking over CNN frames (HF _compute_mask_indices); wav2vec2 paper defaults
+    mask_prob: float = 0.65
+    mask_length: int = 10
+    min_masks: int = 2
+    num_negatives: int = 100  # distractors per masked frame, sampled within the same utterance
+    diversity_loss_weight: float = 0.1
+    gumbel_temperature: float = 0.5  # only used when train_quantizer=True
+    # False: quantizer + project_q frozen *and* kept in eval mode, so targets are
+    # deterministic (argmax codevectors, no Gumbel noise).
+    train_quantizer: bool = False
+    # Which forward feeds the SimCLR/objective head:
+    # "masked": the same masked forward that computes the w2v2 loss (1 backbone pass per view).
+    # "unmasked": a separate unmasked forward for the head, plus the masked one for the
+    #   w2v2 loss only (2x backbone cost -- ablation).
+    # validated at runtime in lightning_module.py.
+    simclr_view: str = "masked"
+
+
+@dataclass
+class OptimHParams:
+    lr_backbone: float = 2e-5  # wav2vec2 params (Transformer, feature_projection, masked_spec_embed, project_hid)
+    lr_head: float = 1e-3  # layer weights, projector, BiLSTM, pooling, embedding_projector, proj_head, cls_head
+    lr_quantizer: float = 1e-5  # quantizer + project_q, only when w2v2.train_quantizer=True
+    weight_decay: float = 1e-2  # not applied to biases, LayerNorm params or the layer-weight vector
+    # linear warmup then cosine decay to 0 over trainer.estimated_stepping_batches (per optimizer step)
+    warmup_steps: int = 100
+    # backbone LR held at 0 for the first N optimizer steps (lets the randomly initialized
+    # head settle first); its warmup+cosine schedule then starts from step N.
+    freeze_backbone_steps: int = 0
 
 
 @dataclass
@@ -123,21 +148,11 @@ class TrainingHParams:
     # "hc_vs_rest_bce": direct supervised HC-vs-rest (PD/MSA/PSP/DYS) binary classification
     #   loss on both views, backpropagated straight into the encoder -- a reachability
     #   sanity check, kept available via configs/hc_vs_rest.yaml to relaunch on demand.
-    # "disease_uniformity": alignment+uniformity (Wang & Isola) on a normalized proj_head
-    #   output split into Z_D/Z_C (see DiseaseHParams) -- HC individuals' Z_D is forced to
-    #   0 (pinned to the Z_C-only equatorial subsphere), letting non-HC individuals' Z_D
-    #   norm emerge as an unsupervised severity signal. Kept available via
-    #   configs/disease_uniformity.yaml.
     # validated at runtime in lightning_module.py.
-    objective: str = "disease_uniformity"
+    objective: str = "simclr"
     batch_size_per_gpu: int = 16  # number of INDIVIDUALS per GPU per step (=> 2x that many views)
-    lr: float = 3e-4  # bumped 3x from 1e-4 -- worth watching for instability now that trainable_mode="frozen"
-    weight_decay: float = 1e-2
-    # ~370 train individuals / 4 GPUs / batch_size_per_gpu=16 => only ~5-6 optimizer
-    # steps/epoch; 500 would take ~100 epochs just to finish warmup, so scale it down
-    # to match this dataset's step-count regime (~20 epochs of warmup instead).
-    warmup_steps: int = 100
     max_epochs: int = 200
+    gradient_clip_val: float = 1.0
     limit_train_batches: float = 1.0  # fraction (0-1) or absolute count of batches; useful for smoke tests
     limit_val_batches: float = 1.0
     precision: str = "bf16-mixed"
@@ -174,7 +189,8 @@ class HParams:
     augment: AugmentHParams = field(default_factory=AugmentHParams)
     data: DataHParams = field(default_factory=DataHParams)
     loss: LossHParams = field(default_factory=LossHParams)
-    disease: DiseaseHParams = field(default_factory=DiseaseHParams)
+    w2v2: W2V2HParams = field(default_factory=W2V2HParams)
+    optim: OptimHParams = field(default_factory=OptimHParams)
     training: TrainingHParams = field(default_factory=TrainingHParams)
     wandb: WandbHParams = field(default_factory=WandbHParams)
     seed: int = 42
