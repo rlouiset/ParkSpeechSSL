@@ -10,4 +10,4 @@ training:
   objective: hc_vs_rest_bce
 
 wandb:
-  name: wav2vec2xlsr_full_blstm_hc_vs_rest_bce
+  name: wav2vec2xlsr_lora16_blstm_hc_vs_rest_bce

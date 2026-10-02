@@ -128,26 +128,13 @@ class PairBatch(TypedDict):
     keys: List[IndividualKey]
 
 
-PAIR_MODES = ("cross_segment", "within_segment")
-
-
 class IndividualPairDataset(Dataset):
-    """One item = one individual's contrastive pair. Two pairing strategies,
-    selected via DataHParams.pair_mode:
-
-    - "cross_segment" (default): if the individual has >=2 segments, the pair
-      is two distinct (augmented) segments; if only 1 (e.g. every FredPrior
-      patient), the pair falls back to that one segment augmented twice --
-      standard SimCLR-style fallback, so no individual is dropped.
-    - "within_segment": always the same single segment for both views (two
-      independent augment_waveform draws), regardless of how many segments
-      the individual has -- classic SimCLR instance discrimination, isolating
-      pure augmentation-invariance from any cross-segment invariance pressure.
-    """
+    """One item = one individual's contrastive pair. If the individual has
+    >=2 segments, the pair is two distinct (augmented) segments; if only 1
+    (e.g. every FredPrior patient), the pair is that one segment augmented
+    twice -- standard SimCLR-style fallback, so no individual is dropped."""
 
     def __init__(self, individuals: List[Individual], data_cfg: DataHParams, augment_cfg: AugmentHParams):
-        if data_cfg.pair_mode not in PAIR_MODES:
-            raise ValueError(f"Unknown data.pair_mode: {data_cfg.pair_mode!r}, expected one of {PAIR_MODES}")
         self.individuals = individuals
         self.data_cfg = data_cfg
         self.augment_cfg = augment_cfg
@@ -157,9 +144,7 @@ class IndividualPairDataset(Dataset):
 
     def __getitem__(self, idx: int):
         ind = self.individuals[idx]
-        if self.data_cfg.pair_mode == "within_segment":
-            p1 = p2 = random.choice(ind.paths)
-        elif len(ind.paths) >= 2:
+        if len(ind.paths) >= 2:
             p1, p2 = random.sample(ind.paths, 2)
         else:
             p1 = p2 = ind.paths[0]
@@ -194,7 +179,6 @@ class SegmentBatch(TypedDict):
     wav: torch.Tensor
     lengths: torch.Tensor
     labels: List[str]
-    keys: List[IndividualKey]  # each segment's individual, for per-individual probe metrics
 
 
 class SegmentDataset(Dataset):
@@ -208,7 +192,7 @@ class SegmentDataset(Dataset):
             if ind.label not in HC_PD_LABELS:
                 continue
             for path in ind.paths:
-                segments.append((path, ind.label, ind.key))
+                segments.append((path, ind.label))
         if max_samples is not None and len(segments) > max_samples:
             rng = random.Random(seed)
             segments = rng.sample(segments, max_samples)
@@ -219,9 +203,9 @@ class SegmentDataset(Dataset):
         return len(self.segments)
 
     def __getitem__(self, idx: int):
-        path, label, key = self.segments[idx]
+        path, label = self.segments[idx]
         wav = load_waveform(path, self.data_cfg.sample_rate, self.data_cfg.max_audio_seconds, self.data_cfg.target_lufs)
-        return {"wav": wav, "label": label, "key": key}
+        return {"wav": wav, "label": label}
 
 
 def collate_segments(batch: list) -> SegmentBatch:
@@ -231,7 +215,6 @@ def collate_segments(batch: list) -> SegmentBatch:
         "wav": pad_sequence(wavs, batch_first=True),
         "lengths": lengths,
         "labels": [b["label"] for b in batch],
-        "keys": [b["key"] for b in batch],
     }
 
 
