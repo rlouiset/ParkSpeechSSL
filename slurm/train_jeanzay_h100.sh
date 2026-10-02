@@ -30,4 +30,6 @@ cd "${SLURM_SUBMIT_DIR}"
 # --ntasks-per-node=4 + srun launches 4 processes, one per H100; Lightning's
 # SLURM environment plugin auto-detects rank/world-size from the SLURM env
 # vars, so training.devices=4 with strategy=ddp in the config just works.
-srun python3 -m pdspeech_ssl.main_ssl
+# any args are passed through as Hydra overrides, e.g.:
+#   sbatch slurm/train_jeanzay_h100.sh loss.hc_vs_rest_hinge_weight=1.0 wandb.name=simclr_hinge
+srun python3 -m pdspeech_ssl.main_ssl "$@"
