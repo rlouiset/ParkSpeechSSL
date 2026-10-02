@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import torch
 import torch.nn as nn
 from sklearn.metrics import balanced_accuracy_score, roc_auc_score
@@ -14,9 +15,10 @@ def train_and_eval_linear_probe(
     epochs: int,
     weight_decay: float,
     device: torch.device,
-) -> tuple[float, float]:
+) -> tuple[float, float, np.ndarray]:
     """Trains a single nn.Linear probe on frozen (already-detached) embeddings
-    to discriminate HC (0) vs PD (1), returns (balanced_accuracy, auc) on val.
+    to discriminate HC (0) vs PD (1), returns (balanced_accuracy, auc, val_probs)
+    on val, where val_probs is the per-segment P(PD) (aligned with val_embd's rows).
 
     This is called from inside Lightning's on_validation_epoch_end, which
     Lightning runs under torch.inference_mode() -- tensors created there are
@@ -54,5 +56,30 @@ def train_and_eval_linear_probe(
         auc = roc_auc_score(val_labels_np, val_probs)
     except ValueError:
         # only one class present in val -- can happen with small probe_max_val_samples
+        auc = float("nan")
+    return balanced_acc, auc, val_probs
+
+
+def individual_level_metrics(
+    keys: list,
+    labels: torch.Tensor,
+    probs: np.ndarray,
+) -> tuple[float, float]:
+    """Aggregates per-segment P(PD) into one score per individual (mean over that
+    individual's segments), then returns individual-level (balanced_accuracy at a
+    0.5 threshold, auc). An individual's label is the same for all its segments."""
+    labels_np = labels.cpu().numpy() if isinstance(labels, torch.Tensor) else np.asarray(labels)
+    by_individual: dict = {}
+    for key, label, prob in zip(keys, labels_np, probs):
+        by_individual.setdefault(key, (label, []))[1].append(prob)
+
+    ind_labels = np.array([label for label, _ in by_individual.values()])
+    ind_probs = np.array([np.mean(segment_probs) for _, segment_probs in by_individual.values()])
+
+    balanced_acc = balanced_accuracy_score(ind_labels, (ind_probs >= 0.5).astype(int))
+    try:
+        auc = roc_auc_score(ind_labels, ind_probs)
+    except ValueError:
+        # only one class present among val individuals
         auc = float("nan")
     return balanced_acc, auc

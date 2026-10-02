@@ -13,8 +13,8 @@ class EncoderHParams:
     checkpoint: str = "facebook/wav2vec2-large-xlsr-53"
     # "frozen": no gradients into wav2vec2 at all.
     # "lora": base weights frozen, LoRA adapters on attention q/v projections.
-    # "full": every wav2vec2 weight above the CNN feature extractor is trainable
-    #   (the CNN feature extractor is always frozen, standard practice for wav2vec2 fine-tuning).
+    # "full": every wav2vec2 weight is trainable, including the CNN feature extractor
+    #   (not frozen here, unlike standard wav2vec2 fine-tuning practice).
     trainable_mode: str = "full"
     lora_r: int = 16
     lora_alpha: int = 32
@@ -84,6 +84,17 @@ class DataHParams:
 class LossHParams:
     temperature: float = 0.1
     gather_across_gpus: bool = True
+    # Auxiliary supervised HC-vs-rest (PD/MSA/PSP/DYS) hinge loss on a trainable linear
+    # cls_head over embd, added on top of training.objective=simclr:
+    #   total = NT-Xent + hc_vs_rest_hinge_weight * mean_over_views(max(0, margin - y * logit)),
+    #   y = -1 HC / +1 rest. 0 disables it (no cls_head is built).
+    hc_vs_rest_hinge_weight: float = 0.0
+    hc_vs_rest_hinge_margin: float = 1.0
+    # Hinge only: logit = s * cos(w, embd) (no bias) instead of w.embd + b, so the margin
+    # can't be met by just inflating ||embd|| / ||w||. Effective margin in cosine units:
+    # hc_vs_rest_hinge_margin / hc_vs_rest_hinge_scale (default 1/5 = 0.2).
+    hc_vs_rest_hinge_cosine: bool = False
+    hc_vs_rest_hinge_scale: float = 5.0
 
 
 @dataclass

@@ -179,6 +179,7 @@ class SegmentBatch(TypedDict):
     wav: torch.Tensor
     lengths: torch.Tensor
     labels: List[str]
+    keys: List[IndividualKey]  # each segment's individual, for per-individual probe metrics
 
 
 class SegmentDataset(Dataset):
@@ -192,7 +193,7 @@ class SegmentDataset(Dataset):
             if ind.label not in HC_PD_LABELS:
                 continue
             for path in ind.paths:
-                segments.append((path, ind.label))
+                segments.append((path, ind.label, ind.key))
         if max_samples is not None and len(segments) > max_samples:
             rng = random.Random(seed)
             segments = rng.sample(segments, max_samples)
@@ -203,9 +204,9 @@ class SegmentDataset(Dataset):
         return len(self.segments)
 
     def __getitem__(self, idx: int):
-        path, label = self.segments[idx]
+        path, label, key = self.segments[idx]
         wav = load_waveform(path, self.data_cfg.sample_rate, self.data_cfg.max_audio_seconds, self.data_cfg.target_lufs)
-        return {"wav": wav, "label": label}
+        return {"wav": wav, "label": label, "key": key}
 
 
 def collate_segments(batch: list) -> SegmentBatch:
@@ -215,6 +216,7 @@ def collate_segments(batch: list) -> SegmentBatch:
         "wav": pad_sequence(wavs, batch_first=True),
         "lengths": lengths,
         "labels": [b["label"] for b in batch],
+        "keys": [b["key"] for b in batch],
     }
 
 
