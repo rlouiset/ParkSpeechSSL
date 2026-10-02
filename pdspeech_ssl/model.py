@@ -125,6 +125,8 @@ def _build_wav2vec2(
     elif enc_cfg.trainable_mode == "full":
         for p in model.parameters():
             p.requires_grad = True
+        if enc_cfg.freeze_feature_encoder:
+            model.freeze_feature_encoder()
 
     else:
         raise ValueError(

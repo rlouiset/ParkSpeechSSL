@@ -16,6 +16,9 @@ class EncoderHParams:
     # "full": every wav2vec2 weight is trainable, including the CNN feature extractor
     #   (not frozen here, unlike standard wav2vec2 fine-tuning practice).
     trainable_mode: str = "full"
+    # "full" only: freeze the CNN feature extractor (standard wav2vec2 fine-tuning practice),
+    # training only the Transformer + feature projection. Ablation for the trainable-CNN default.
+    freeze_feature_encoder: bool = False
     lora_r: int = 16
     lora_alpha: int = 32
     lora_dropout: float = 0.05
