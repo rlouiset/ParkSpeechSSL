@@ -104,10 +104,22 @@ class LossHParams:
     # hc_vs_rest_hinge_margin / hc_vs_rest_hinge_scale (default 1/5 = 0.2).
     hc_vs_rest_hinge_cosine: bool = False
     hc_vs_rest_hinge_scale: float = 5.0
-    # EMA momentum of c, updated once per training step from the (all-GPU) batch mean.
-    # A running mean rather than the batch mean itself: with 16 individuals per GPU, the
-    # batch mean would shift with each batch's HC/rest ratio.
+    # Hinge only, exclusive with hc_vs_rest_hinge_cosine: logit = w/||w|| . (embd - c) / sigma + b,
+    # c / sigma^2 the running per-dimension mean / variance of embd. Like the plain linear hinge,
+    # the satisfied region is a half-space, so every direction orthogonal to w stays free (the
+    # cosine's cone also limits spread orthogonal to w); like the cosine, the margin can't be met
+    # by inflating ||embd|| / ||w||: it is in units of embd's standard deviation. A margin close
+    # to 1 is only met by squeezing each class to a point along w (the classes' total std along
+    # w is ~1), so use a margin around 0.5.
+    hc_vs_rest_hinge_standardized: bool = False
+    # EMA momentum of c (and sigma^2), updated once per training step from the (all-GPU) batch
+    # statistics. Running statistics rather than the batch's own: with 16 individuals per GPU,
+    # they would shift with each batch's HC/rest ratio.
     hc_vs_rest_hinge_center_momentum: float = 0.1
+    # learning rate of cls_head (null = training.lr), without weight decay. The cosine and
+    # standardized hinges only use w's direction, which turns by ~lr * sqrt(d_emb) / ||w|| per
+    # step: at lr=3e-4 and ~6 steps/epoch, a 90-degree turn takes ~80 epochs.
+    hc_vs_rest_hinge_head_lr: Optional[float] = None
 
 
 @dataclass

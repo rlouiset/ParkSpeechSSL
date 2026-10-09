@@ -33,28 +33,33 @@ class SSLLightningModule(pl.LightningModule):
                 "loss.hc_vs_rest_hinge_weight > 0 is an auxiliary term on top of training.objective=simclr, "
                 f"got objective={cfg.training.objective!r}."
             )
-        if cfg.loss.hc_vs_rest_hinge_cosine and cfg.loss.hc_vs_rest_hinge_weight <= 0:
-            raise ValueError(
-                "loss.hc_vs_rest_hinge_cosine only applies to the hinge loss; "
-                "set loss.hc_vs_rest_hinge_weight > 0 too."
-            )
+        for flag in ("hc_vs_rest_hinge_cosine", "hc_vs_rest_hinge_standardized"):
+            if getattr(cfg.loss, flag) and cfg.loss.hc_vs_rest_hinge_weight <= 0:
+                raise ValueError(f"loss.{flag} only applies to the hinge loss; set loss.hc_vs_rest_hinge_weight > 0 too.")
+        if cfg.loss.hc_vs_rest_hinge_cosine and cfg.loss.hc_vs_rest_hinge_standardized:
+            raise ValueError("loss.hc_vs_rest_hinge_cosine and loss.hc_vs_rest_hinge_standardized are exclusive.")
         self.cfg = cfg
         self.model = SSLEncoder(cfg.encoder, cfg.model)
         # cls_head only exists for the hc_vs_rest_bce objective or the auxiliary hinge --
         # keeping it out of the graph entirely otherwise (rather than just unused) avoids
         # padding DDP's unused-parameter bookkeeping and the checkpoint with dead weights.
         needs_cls_head = cfg.training.objective == "hc_vs_rest_bce" or self._use_hinge
-        # cosine hinge: the bias is the learned angular threshold, see _hinge_logit
+        # cosine / standardized hinge: the bias is the learned threshold, see _hinge_logit
         self.cls_head = nn.Linear(cfg.model.d_emb, 1) if needs_cls_head else None
-        if cfg.loss.hc_vs_rest_hinge_cosine:
-            # running mean of embd the cosine is measured from (see LossHParams.hc_vs_rest_hinge_cosine)
+        if self._hinge_uses_running_stats:
+            # running mean / variance of embd (see LossHParams.hc_vs_rest_hinge_{cosine,standardized})
             self.register_buffer("hinge_center", torch.zeros(cfg.model.d_emb))
+            self.register_buffer("hinge_var", torch.ones(cfg.model.d_emb))
             self.register_buffer("hinge_center_initialized", torch.tensor(False))
         self.bce = nn.BCEWithLogitsLoss() if cfg.training.objective == "hc_vs_rest_bce" else None
 
     @property
     def _use_hinge(self) -> bool:
         return self.cfg.loss.hc_vs_rest_hinge_weight > 0
+
+    @property
+    def _hinge_uses_running_stats(self) -> bool:
+        return self.cfg.loss.hc_vs_rest_hinge_cosine or self.cfg.loss.hc_vs_rest_hinge_standardized
 
     def _embed_pair(self, batch: PairBatch) -> tuple[torch.Tensor, torch.Tensor]:
         out1 = self.model(batch["view1"], batch["len1"], augment_cfg=self.cfg.augment)
@@ -81,29 +86,39 @@ class SSLLightningModule(pl.LightningModule):
         return 0.5 * (self.bce(logit1, targets) + self.bce(logit2, targets))
 
     def _hinge_logit(self, embd: torch.Tensor) -> torch.Tensor:
-        if not self.cfg.loss.hc_vs_rest_hinge_cosine:
-            return self.cls_head(embd).squeeze(-1)
-        centred = embd - self.hinge_center
-        cos = nn.functional.normalize(centred, dim=-1) @ nn.functional.normalize(self.cls_head.weight, dim=-1).T
-        return self.cfg.loss.hc_vs_rest_hinge_scale * (cos.squeeze(-1) + self.cls_head.bias)
+        w_dir = nn.functional.normalize(self.cls_head.weight, dim=-1)
+        if self.cfg.loss.hc_vs_rest_hinge_cosine:
+            centred = embd - self.hinge_center
+            cos = nn.functional.normalize(centred, dim=-1) @ w_dir.T
+            return self.cfg.loss.hc_vs_rest_hinge_scale * (cos.squeeze(-1) + self.cls_head.bias)
+        if self.cfg.loss.hc_vs_rest_hinge_standardized:
+            standardized = (embd - self.hinge_center) * torch.rsqrt(self.hinge_var + 1e-5)
+            return (standardized @ w_dir.T).squeeze(-1) + self.cls_head.bias
+        return self.cls_head(embd).squeeze(-1)
 
     @torch.no_grad()
-    def _update_hinge_center(self, embds: list[torch.Tensor]) -> None:
-        batch_mean = torch.cat(embds).float().mean(0)
+    def _update_hinge_stats(self, embds: list[torch.Tensor]) -> None:
+        batch = torch.cat(embds).float()
+        moments = torch.stack([batch.mean(0), batch.pow(2).mean(0)])
         if self.trainer.world_size > 1:
-            batch_mean = self.all_gather(batch_mean).mean(0)
+            # equal batch sizes on every rank (drop_last=True), so the mean of means is the global mean
+            moments = self.all_gather(moments).mean(0)
+        mean, var = moments[0], (moments[1] - moments[0] ** 2).clamp_min(0)
         if not self.hinge_center_initialized:
-            self.hinge_center.copy_(batch_mean)
+            self.hinge_center.copy_(mean)
+            self.hinge_var.copy_(var)
             self.hinge_center_initialized.fill_(True)
         else:
-            self.hinge_center.lerp_(batch_mean, self.cfg.loss.hc_vs_rest_hinge_center_momentum)
+            momentum = self.cfg.loss.hc_vs_rest_hinge_center_momentum
+            self.hinge_center.lerp_(mean, momentum)
+            self.hinge_var.lerp_(var, momentum)
 
     def _hinge_loss(self, out1: dict, out2: dict, batch: PairBatch, stage: str) -> torch.Tensor:
         """Auxiliary HC-vs-rest hinge: max(0, margin - y * logit), y = -1 HC / +1 rest,
         averaged over individuals and over both views (logit: see _hinge_logit)."""
         embds = [out1["embd"], out2["embd"]]
-        if self.cfg.loss.hc_vs_rest_hinge_cosine and self.training:
-            self._update_hinge_center(embds)
+        if self._hinge_uses_running_stats and self.training:
+            self._update_hinge_stats(embds)
         y = 2.0 * _hc_vs_rest_targets(batch["labels"], self.device) - 1.0
         margin = self.cfg.loss.hc_vs_rest_hinge_margin
         logits = [self._hinge_logit(embd) for embd in embds]
@@ -117,7 +132,8 @@ class SSLLightningModule(pl.LightningModule):
         - cos_raw_{hc,rest}: mean cos(w, embd) per class. Same sign for both = the embeddings
           are offset from the origin and a bias-free cosine can't separate them.
         - anisotropy: mean cos(embd_i, batch mean). Close to 1 = narrow cone.
-        - embd_norm: cosine gradients into the encoder scale as 1 / ||embd||.
+        - embd_norm: cosine gradients into the encoder scale as 1 / ||embd||. Standardized hinge: steady
+          growth = the encoder inflating embd faster than the running sigma catches up.
         - logit_{hc,rest}, active_frac: what the loss sees; active_frac stuck near 1 = margin unreachable.
         Per-rank values, no cross-GPU sync: a rank's batch can lack HC, and a sync_dist log
         that only some ranks call would hang the collective."""
@@ -257,15 +273,20 @@ class SSLLightningModule(pl.LightningModule):
         # NOTE: reloading one of these later needs load_state_dict(..., strict=False),
         # since the frozen backbone is intentionally absent from the saved state_dict.
         trainable = {name for name, p in self.named_parameters() if p.requires_grad}
-        trainable |= {name for name, _ in self.named_buffers() if name.startswith("hinge_center")}
+        trainable |= {name for name, _ in self.named_buffers() if name.startswith("hinge_")}
         checkpoint["state_dict"] = {k: v for k, v in checkpoint["state_dict"].items() if k in trainable}
 
     def configure_optimizers(self):
         params = [p for p in self.model.parameters() if p.requires_grad]
+        param_groups = [{"params": params}]
         if self.cls_head is not None:
-            params += list(self.cls_head.parameters())
+            head_lr = self.cfg.loss.hc_vs_rest_hinge_head_lr
+            if self._use_hinge and head_lr is not None:
+                param_groups.append({"params": list(self.cls_head.parameters()), "lr": head_lr, "weight_decay": 0.0})
+            else:
+                param_groups[0]["params"] = params + list(self.cls_head.parameters())
         optimizer = torch.optim.AdamW(
-            params, lr=self.cfg.training.lr, weight_decay=self.cfg.training.weight_decay
+            param_groups, lr=self.cfg.training.lr, weight_decay=self.cfg.training.weight_decay
         )
         return {
             "optimizer": optimizer

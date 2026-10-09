@@ -93,32 +93,39 @@ def run_clinical_probes(
     n_splits: int,
     seed: int,
 ) -> Dict[str, float]:
-    """One (segment-averaged) embedding per individual in, metrics out:
+    """One (segment-averaged) embedding per individual in, metrics out. Every probe is
+    within one class, to measure how much intra-class variability the embedding keeps:
     - erank_{pd,hc}: effective rank of all PD / HC individuals' embeddings (metadata not needed)
-    - updrs_pd: PD only, NeuroVoz total UPDRS
-    - hy_pd: PD only, H&Y (NeuroVoz + KCL)
-    - age_pd: PD only (NeuroVoz, IPVS, FredPrior) -- not pooled with HC, since IPVS'
+    - updrs_pd: NeuroVoz total UPDRS
+    - hy_pd: H&Y (NeuroVoz + KCL)
+    - age_{pd,hc}: NeuroVoz, IPVS, FredPrior. Never pooled across classes, since IPVS'
       young-HC group makes age a proxy for diagnosis there
-    - sex: HC + PD, AUC -- a control, should not drop when the hinge is added
+    - sex_{pd,hc}: AUC
     """
     labels_np = np.array(labels)
-    results = {
-        "erank_pd": effective_rank(embd[labels_np == "PD"]),
-        "erank_hc": effective_rank(embd[labels_np == "HC"]),
-    }
-
     rows = [metadata.get(k) for k in keys]
     datasets = np.array([k[0] for k in keys])
-
-    is_pd = labels_np == "PD"
-    for field, name in (("updrs", "updrs_pd"), ("hy", "hy_pd"), ("age", "age_pd")):
-        y = np.array([r[field] if r is not None else math.nan for r in rows])
-        mask = is_pd & ~np.isnan(y)
-        if mask.sum() >= 2 * n_splits:
-            results.update(cv_regression(embd[mask], list(datasets[mask]), y[mask], n_splits, seed, name))
-
     sex = np.array([r["sex"] if r is not None else "" for r in rows])
-    mask = np.isin(sex, ["M", "F"])
-    if min((sex[mask] == "M").sum(), (sex[mask] == "F").sum()) >= n_splits:
-        results.update(cv_classification(embd[mask], (sex[mask] == "M").astype(int), n_splits, seed, "sex"))
+    results = {}
+
+    def field(name: str) -> np.ndarray:
+        return np.array([r[name] if r is not None else math.nan for r in rows])
+
+    for label in ("PD", "HC"):
+        suffix = label.lower()
+        in_class = labels_np == label
+        results[f"erank_{suffix}"] = effective_rank(embd[in_class])
+
+        targets = (("updrs", "hy", "age") if label == "PD" else ("age",))
+        for target in targets:
+            y = field(target)
+            mask = in_class & ~np.isnan(y)
+            if mask.sum() >= 2 * n_splits:
+                results.update(
+                    cv_regression(embd[mask], list(datasets[mask]), y[mask], n_splits, seed, f"{target}_{suffix}")
+                )
+
+        mask = in_class & np.isin(sex, ["M", "F"])
+        if min((sex[mask] == "M").sum(), (sex[mask] == "F").sum()) >= n_splits:
+            results.update(cv_classification(embd[mask], (sex[mask] == "M").astype(int), n_splits, seed, f"sex_{suffix}"))
     return results

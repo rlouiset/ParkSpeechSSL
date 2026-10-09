@@ -30,6 +30,8 @@ def main(cfg: HParams) -> None:
     # relative "checkpoints" would land under $SLURM_SUBMIT_DIR ($HOME on Jean Zay --
     # small quota); default to $WORK there, fall back to a local relative dir otherwise.
     checkpoint_dir = os.path.join(os.environ["WORK"], "pdspeech_ssl_checkpoints") if "WORK" in os.environ else "checkpoints"
+    # one subfolder per run, so concurrent jobs don't mix their top-k / overwrite each other's last.ckpt
+    checkpoint_dir = os.path.join(checkpoint_dir, f"{cfg.wandb.name}_{os.environ.get('SLURM_JOB_ID', 'local')}")
     checkpoint_cb = ModelCheckpoint(
         dirpath=checkpoint_dir,
         # NOTE: metric names containing "/" can't be used inside the filename
