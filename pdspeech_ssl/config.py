@@ -81,6 +81,9 @@ class DataHParams:
     # Set to None to disable.
     target_lufs: Optional[float] = -23.0
     num_workers: int = 8
+    # per-individual age/sex/UPDRS/H&Y (preprocessing_scripts/build_metadata.py), for the
+    # clinical probes; null -> {derivatives_root}/metadata.csv. Probes are skipped if missing.
+    metadata_csv: Optional[str] = None
 
 
 @dataclass
@@ -93,11 +96,18 @@ class LossHParams:
     #   y = -1 HC / +1 rest. 0 disables it (no cls_head is built).
     hc_vs_rest_hinge_weight: float = 0.0
     hc_vs_rest_hinge_margin: float = 1.0
-    # Hinge only: logit = s * cos(w, embd) (no bias) instead of w.embd + b, so the margin
-    # can't be met by just inflating ||embd|| / ||w||. Effective margin in cosine units:
+    # Hinge only: logit = s * (cos(w, embd - c) + b) instead of w.embd + b, so the margin
+    # can't be met by just inflating ||embd|| / ||w||. c is a running (EMA) mean of embd:
+    # without it, embd sits in a narrow cone around a large shared mean, every sample gets the
+    # same cosine sign, and the encoder has to re-centre the whole cloud to meet the margin.
+    # b is a learned angular threshold (the cls_head bias). Effective margin in cosine units:
     # hc_vs_rest_hinge_margin / hc_vs_rest_hinge_scale (default 1/5 = 0.2).
     hc_vs_rest_hinge_cosine: bool = False
     hc_vs_rest_hinge_scale: float = 5.0
+    # EMA momentum of c, updated once per training step from the (all-GPU) batch mean.
+    # A running mean rather than the batch mean itself: with 16 individuals per GPU, the
+    # batch mean would shift with each batch's HC/rest ratio.
+    hc_vs_rest_hinge_center_momentum: float = 0.1
 
 
 @dataclass
@@ -139,6 +149,14 @@ class TrainingHParams:
     # (probe runs on rank 0 only, over individual *segments*, not paired individuals)
     probe_max_train_samples: int = 4000
     probe_max_val_samples: int = 1000
+    # how often (in epochs) to run the clinical probes (pdspeech_ssl/clinical_probe.py):
+    # PD effective rank, UPDRS / H&Y / age within PD, sex. Run on frozen embeddings of every
+    # HC/PD individual (train + val -- neither objective sees these targets), cross-validated
+    # across individuals. 0 disables.
+    clinical_probe_every_n_epochs: int = 10
+    clinical_probe_n_splits: int = 5
+    # segments averaged into each individual's embedding (random subset, fixed seed)
+    clinical_probe_max_segments_per_individual: int = 8
 
 
 @dataclass

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import numpy as np
 import torch
 import torch.nn as nn
 import lightning.pytorch as pl
 
+from pdspeech_ssl.clinical_probe import run_clinical_probes
 from pdspeech_ssl.config import HParams
 from pdspeech_ssl.data import PairBatch, SegmentBatch
 from pdspeech_ssl.linear_probe import individual_level_metrics, train_and_eval_linear_probe
@@ -42,10 +44,12 @@ class SSLLightningModule(pl.LightningModule):
         # keeping it out of the graph entirely otherwise (rather than just unused) avoids
         # padding DDP's unused-parameter bookkeeping and the checkpoint with dead weights.
         needs_cls_head = cfg.training.objective == "hc_vs_rest_bce" or self._use_hinge
-        # cosine hinge: logit = s * cos(w, embd), a bias would be unused
-        self.cls_head = (
-            nn.Linear(cfg.model.d_emb, 1, bias=not cfg.loss.hc_vs_rest_hinge_cosine) if needs_cls_head else None
-        )
+        # cosine hinge: the bias is the learned angular threshold, see _hinge_logit
+        self.cls_head = nn.Linear(cfg.model.d_emb, 1) if needs_cls_head else None
+        if cfg.loss.hc_vs_rest_hinge_cosine:
+            # running mean of embd the cosine is measured from (see LossHParams.hc_vs_rest_hinge_cosine)
+            self.register_buffer("hinge_center", torch.zeros(cfg.model.d_emb))
+            self.register_buffer("hinge_center_initialized", torch.tensor(False))
         self.bce = nn.BCEWithLogitsLoss() if cfg.training.objective == "hc_vs_rest_bce" else None
 
     @property
@@ -79,16 +83,60 @@ class SSLLightningModule(pl.LightningModule):
     def _hinge_logit(self, embd: torch.Tensor) -> torch.Tensor:
         if not self.cfg.loss.hc_vs_rest_hinge_cosine:
             return self.cls_head(embd).squeeze(-1)
-        cos = nn.functional.normalize(embd, dim=-1) @ nn.functional.normalize(self.cls_head.weight, dim=-1).T
-        return self.cfg.loss.hc_vs_rest_hinge_scale * cos.squeeze(-1)
+        centred = embd - self.hinge_center
+        cos = nn.functional.normalize(centred, dim=-1) @ nn.functional.normalize(self.cls_head.weight, dim=-1).T
+        return self.cfg.loss.hc_vs_rest_hinge_scale * (cos.squeeze(-1) + self.cls_head.bias)
 
-    def _hinge_loss(self, out1: dict, out2: dict, batch: PairBatch) -> torch.Tensor:
+    @torch.no_grad()
+    def _update_hinge_center(self, embds: list[torch.Tensor]) -> None:
+        batch_mean = torch.cat(embds).float().mean(0)
+        if self.trainer.world_size > 1:
+            batch_mean = self.all_gather(batch_mean).mean(0)
+        if not self.hinge_center_initialized:
+            self.hinge_center.copy_(batch_mean)
+            self.hinge_center_initialized.fill_(True)
+        else:
+            self.hinge_center.lerp_(batch_mean, self.cfg.loss.hc_vs_rest_hinge_center_momentum)
+
+    def _hinge_loss(self, out1: dict, out2: dict, batch: PairBatch, stage: str) -> torch.Tensor:
         """Auxiliary HC-vs-rest hinge: max(0, margin - y * logit), y = -1 HC / +1 rest,
         averaged over individuals and over both views (logit: see _hinge_logit)."""
+        embds = [out1["embd"], out2["embd"]]
+        if self.cfg.loss.hc_vs_rest_hinge_cosine and self.training:
+            self._update_hinge_center(embds)
         y = 2.0 * _hc_vs_rest_targets(batch["labels"], self.device) - 1.0
         margin = self.cfg.loss.hc_vs_rest_hinge_margin
-        losses = [nn.functional.relu(margin - y * self._hinge_logit(out["embd"])).mean() for out in (out1, out2)]
+        logits = [self._hinge_logit(embd) for embd in embds]
+        losses = [nn.functional.relu(margin - y * logit).mean() for logit in logits]
+        self._log_hinge_diagnostics(torch.cat(embds), torch.cat(logits), torch.cat([y, y]), stage)
         return 0.5 * (losses[0] + losses[1])
+
+    @torch.no_grad()
+    def _log_hinge_diagnostics(self, embd: torch.Tensor, logit: torch.Tensor, y: torch.Tensor, stage: str) -> None:
+        """Why a hinge does or doesn't train, on raw (uncentred) embd:
+        - cos_raw_{hc,rest}: mean cos(w, embd) per class. Same sign for both = the embeddings
+          are offset from the origin and a bias-free cosine can't separate them.
+        - anisotropy: mean cos(embd_i, batch mean). Close to 1 = narrow cone.
+        - embd_norm: cosine gradients into the encoder scale as 1 / ||embd||.
+        - logit_{hc,rest}, active_frac: what the loss sees; active_frac stuck near 1 = margin unreachable.
+        Per-rank values, no cross-GPU sync: a rank's batch can lack HC, and a sync_dist log
+        that only some ranks call would hang the collective."""
+        embd, logit = embd.float(), logit.float()
+        w = nn.functional.normalize(self.cls_head.weight.float(), dim=-1)
+        cos_raw = (nn.functional.normalize(embd, dim=-1) @ w.T).squeeze(-1)
+        anisotropy = nn.functional.cosine_similarity(embd, embd.mean(0, keepdim=True), dim=-1).mean()
+        margin = self.cfg.loss.hc_vs_rest_hinge_margin
+
+        log_kwargs = dict(on_step=False, on_epoch=True, sync_dist=False)
+        prefix = f"{stage}/hinge_diag"
+        self.log(f"{prefix}/anisotropy", anisotropy, batch_size=len(embd), **log_kwargs)
+        self.log(f"{prefix}/embd_norm", embd.norm(dim=-1).mean(), batch_size=len(embd), **log_kwargs)
+        self.log(f"{prefix}/active_frac", (margin - y * logit > 0).float().mean(), batch_size=len(embd), **log_kwargs)
+        for name, mask in (("hc", y < 0), ("rest", y > 0)):
+            if mask.any():
+                n = int(mask.sum())
+                self.log(f"{prefix}/cos_raw_{name}", cos_raw[mask].mean(), batch_size=n, **log_kwargs)
+                self.log(f"{prefix}/logit_{name}", logit[mask].mean(), batch_size=n, **log_kwargs)
 
     def _step(self, batch: PairBatch, stage: str) -> torch.Tensor:
         """total = objective_loss (+ loss.hc_vs_rest_hinge_weight * hc_vs_rest_hinge)."""
@@ -104,7 +152,7 @@ class SSLLightningModule(pl.LightningModule):
 
         total = objective_loss
         if self._use_hinge:
-            hinge = self._hinge_loss(out1, out2, batch)
+            hinge = self._hinge_loss(out1, out2, batch, stage)
             total = total + self.cfg.loss.hc_vs_rest_hinge_weight * hinge
             self.log(f"{stage}/hc_vs_rest_hinge", hinge, **log_kwargs)
             self.log(f"{stage}/total_loss", total, **log_kwargs)
@@ -175,6 +223,33 @@ class SSLLightningModule(pl.LightningModule):
         # (see NOTE in main_ssl.py -- "/" in a template key is read as a subdirectory)
         self.log("bal_acc", balanced_acc, rank_zero_only=True, prog_bar=False)
 
+        every = self.cfg.training.clinical_probe_every_n_epochs
+        if every > 0 and (self.current_epoch + 1) % every == 0:
+            self._clinical_probe_epoch_end()
+
+    def _clinical_probe_epoch_end(self) -> None:
+        """Logs Clinical/* (see clinical_probe.run_clinical_probes): one embedding per HC/PD
+        individual (mean over its segments), train + val, cross-validated across individuals."""
+        results: dict = {}
+        if self.trainer.is_global_zero:
+            datamodule = self.trainer.datamodule
+            embd, _, keys = self._embed_segments(datamodule.clinical_probe_dataloader())
+            self.model.train()
+            by_individual: dict = {}
+            for key, e in zip(keys, embd.float().numpy()):
+                by_individual.setdefault(key, []).append(e)
+            ind_keys = list(by_individual)
+            ind_embd = np.stack([np.mean(by_individual[k], axis=0) for k in ind_keys])
+            label_of = {ind.key: ind.label for ind in datamodule.train_individuals + datamodule.val_individuals}
+            results = run_clinical_probes(
+                ind_keys, [label_of[k] for k in ind_keys], ind_embd, datamodule.metadata,
+                n_splits=self.cfg.training.clinical_probe_n_splits, seed=self.cfg.seed,
+            )
+        if self.trainer.world_size > 1:
+            results = self.trainer.strategy.broadcast(results, src=0)
+        for name, value in results.items():
+            self.log(f"Clinical/{name}", value, rank_zero_only=True)
+
     def on_save_checkpoint(self, checkpoint: dict) -> None:
         # wav2vec2's frozen base weights (~1.2GB) never change from the pretrained
         # checkpoint and don't need saving every time -- only the LoRA adapters and
@@ -182,6 +257,7 @@ class SSLLightningModule(pl.LightningModule):
         # NOTE: reloading one of these later needs load_state_dict(..., strict=False),
         # since the frozen backbone is intentionally absent from the saved state_dict.
         trainable = {name for name, p in self.named_parameters() if p.requires_grad}
+        trainable |= {name for name, _ in self.named_buffers() if name.startswith("hinge_center")}
         checkpoint["state_dict"] = {k: v for k, v in checkpoint["state_dict"].items() if k in trainable}
 
     def configure_optimizers(self):

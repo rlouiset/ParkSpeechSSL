@@ -12,6 +12,7 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset
 
 from pdspeech_ssl.augment import augment_waveform
+from pdspeech_ssl.clinical_probe import load_metadata
 from pdspeech_ssl.config import AugmentHParams, DataHParams
 
 HC_PD_LABELS = ("HC", "PD")
@@ -187,15 +188,25 @@ class SegmentDataset(Dataset):
     linear probe, which wants many samples for a stable metric, not one
     embedding per individual."""
 
-    def __init__(self, individuals: List[Individual], data_cfg: DataHParams, max_samples: int | None, seed: int):
+    def __init__(
+        self,
+        individuals: List[Individual],
+        data_cfg: DataHParams,
+        max_samples: int | None,
+        seed: int,
+        max_per_individual: int | None = None,
+    ):
+        rng = random.Random(seed)
         segments = []
         for ind in individuals:
             if ind.label not in HC_PD_LABELS:
                 continue
-            for path in ind.paths:
+            paths = ind.paths
+            if max_per_individual is not None and len(paths) > max_per_individual:
+                paths = rng.sample(paths, max_per_individual)
+            for path in paths:
                 segments.append((path, ind.label, ind.key))
         if max_samples is not None and len(segments) > max_samples:
-            rng = random.Random(seed)
             segments = rng.sample(segments, max_samples)
         self.segments = segments
         self.data_cfg = data_cfg
@@ -228,6 +239,7 @@ class PDSpeechDataModule(pl.LightningDataModule):
         self.training_cfg = training_cfg
         self.train_individuals: List[Individual] = []
         self.val_individuals: List[Individual] = []
+        self.metadata: Dict[IndividualKey, dict] = {}
 
     def setup(self, stage: str | None = None):
         individuals = scan_derivatives(Path(self.data_cfg.derivatives_root))
@@ -239,6 +251,13 @@ class PDSpeechDataModule(pl.LightningDataModule):
             f"({sum(1 for i in self.train_individuals if i.label in HC_PD_LABELS)} HC/PD), "
             f"{len(self.val_individuals)} val individuals (all HC/PD)"
         )
+
+        metadata_path = Path(self.data_cfg.metadata_csv or Path(self.data_cfg.derivatives_root) / "metadata.csv")
+        if metadata_path.exists():
+            self.metadata = load_metadata(metadata_path)
+            print(f"[data] metadata for {len(self.metadata)} individuals from {metadata_path}")
+        else:
+            print(f"[data] no metadata at {metadata_path}: UPDRS/H&Y/age/sex probes will be skipped")
 
     def train_dataloader(self) -> DataLoader:
         ds = IndividualPairDataset(self.train_individuals, self.data_cfg, self.augment_cfg)
@@ -274,5 +293,12 @@ class PDSpeechDataModule(pl.LightningDataModule):
     def probe_val_dataloader(self) -> DataLoader:
         ds = SegmentDataset(
             self.val_individuals, self.data_cfg, self.training_cfg.probe_max_val_samples, self.data_cfg.split_seed
+        )
+        return DataLoader(ds, batch_size=32, shuffle=False, collate_fn=collate_segments, num_workers=2)
+
+    def clinical_probe_dataloader(self) -> DataLoader:
+        ds = SegmentDataset(
+            self.train_individuals + self.val_individuals, self.data_cfg, max_samples=None, seed=self.data_cfg.split_seed,
+            max_per_individual=self.training_cfg.clinical_probe_max_segments_per_individual,
         )
         return DataLoader(ds, batch_size=32, shuffle=False, collate_fn=collate_segments, num_workers=2)
