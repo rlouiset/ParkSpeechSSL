@@ -88,10 +88,7 @@ def _build_wav2vec2(
     enc_cfg: EncoderHParams,
 ) -> tuple[Wav2Vec2Model, Wav2Vec2FeatureExtractor]:
 
-    model_name = (
-        "/lustre/fswork/projects/rech/haj/uik24xv/"
-        "huggingface/wav2vec2-xlsr-53-espeak-cv-ft"
-    )
+    model_name = enc_cfg.checkpoint
 
     processor = Wav2Vec2FeatureExtractor.from_pretrained(
         model_name,

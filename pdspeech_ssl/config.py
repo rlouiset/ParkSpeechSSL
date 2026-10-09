@@ -8,9 +8,11 @@ from typing import List, Optional
 
 @dataclass
 class EncoderHParams:
-    # HuggingFace checkpoint. XLSR-53 chosen for multilingual coverage
-    # (our datasets span Italian, Spanish, Czech, Mandarin, English).
-    checkpoint: str = "facebook/wav2vec2-large-xlsr-53"
+    # HuggingFace checkpoint (hub id or local dir), loaded with local_files_only=True.
+    # XLSR-53 for multilingual coverage (our datasets span Italian, Spanish, Czech, Mandarin,
+    # English); the phoneme-finetuned espeak variant is what the ~0.8 probe-AUC SimCLR run
+    # used -- raw facebook/wav2vec2-large-xlsr-53 stays below 0.6.
+    checkpoint: str = "/lustre/fswork/projects/rech/haj/uik24xv/huggingface/wav2vec2-xlsr-53-espeak-cv-ft"
     # "frozen": no gradients into wav2vec2 at all.
     # "lora": base weights frozen, LoRA adapters on attention q/v projections.
     # "full": every wav2vec2 weight is trainable, including the CNN feature extractor

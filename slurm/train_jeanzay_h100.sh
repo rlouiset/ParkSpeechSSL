@@ -14,7 +14,10 @@
 # allocation name (this mirrors the @a100 example's convention, but I can't
 # verify the exact current H100 account suffix/partition naming from here).
 
- # must have: torch, torchaudio, lightning, wandb, transformers==4.53.3,
+module purge
+conda deactivate
+module load miniforge/24.9.0
+conda activate py39  # must have: torch, torchaudio, lightning, wandb, transformers==4.53.3,
                      # peft, soundfile, scikit-learn, hydra-core, omegaconf, pyloudnorm installed
 
 export WANDB_MODE=offline
