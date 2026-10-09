@@ -33,6 +33,13 @@ class SSLLightningModule(pl.LightningModule):
                 "loss.hc_vs_rest_hinge_weight > 0 is an auxiliary term on top of training.objective=simclr, "
                 f"got objective={cfg.training.objective!r}."
             )
+        if cfg.loss.hc_vs_rest_bce_weight > 0 and cfg.training.objective != "simclr":
+            raise ValueError(
+                "loss.hc_vs_rest_bce_weight > 0 is an auxiliary term on top of training.objective=simclr, "
+                f"got objective={cfg.training.objective!r} (use training.objective=hc_vs_rest_bce alone instead)."
+            )
+        if cfg.loss.hc_vs_rest_bce_weight > 0 and cfg.loss.hc_vs_rest_hinge_weight > 0:
+            raise ValueError("loss.hc_vs_rest_bce_weight and loss.hc_vs_rest_hinge_weight are exclusive.")
         for flag in ("hc_vs_rest_hinge_cosine", "hc_vs_rest_hinge_standardized"):
             if getattr(cfg.loss, flag) and cfg.loss.hc_vs_rest_hinge_weight <= 0:
                 raise ValueError(f"loss.{flag} only applies to the hinge loss; set loss.hc_vs_rest_hinge_weight > 0 too.")
@@ -40,10 +47,11 @@ class SSLLightningModule(pl.LightningModule):
             raise ValueError("loss.hc_vs_rest_hinge_cosine and loss.hc_vs_rest_hinge_standardized are exclusive.")
         self.cfg = cfg
         self.model = SSLEncoder(cfg.encoder, cfg.model)
-        # cls_head only exists for the hc_vs_rest_bce objective or the auxiliary hinge --
+        # cls_head only exists for the hc_vs_rest_bce objective or the auxiliary BCE / hinge --
         # keeping it out of the graph entirely otherwise (rather than just unused) avoids
         # padding DDP's unused-parameter bookkeeping and the checkpoint with dead weights.
-        needs_cls_head = cfg.training.objective == "hc_vs_rest_bce" or self._use_hinge
+        needs_bce = cfg.training.objective == "hc_vs_rest_bce" or self._use_aux_bce
+        needs_cls_head = needs_bce or self._use_hinge
         # cosine / standardized hinge: the bias is the learned threshold, see _hinge_logit
         self.cls_head = nn.Linear(cfg.model.d_emb, 1) if needs_cls_head else None
         if self._hinge_uses_running_stats:
@@ -51,7 +59,11 @@ class SSLLightningModule(pl.LightningModule):
             self.register_buffer("hinge_center", torch.zeros(cfg.model.d_emb))
             self.register_buffer("hinge_var", torch.ones(cfg.model.d_emb))
             self.register_buffer("hinge_center_initialized", torch.tensor(False))
-        self.bce = nn.BCEWithLogitsLoss() if cfg.training.objective == "hc_vs_rest_bce" else None
+        self.bce = nn.BCEWithLogitsLoss() if needs_bce else None
+
+    @property
+    def _use_aux_bce(self) -> bool:
+        return self.cfg.loss.hc_vs_rest_bce_weight > 0
 
     @property
     def _use_hinge(self) -> bool:
@@ -155,7 +167,8 @@ class SSLLightningModule(pl.LightningModule):
                 self.log(f"{prefix}/logit_{name}", logit[mask].mean(), batch_size=n, **log_kwargs)
 
     def _step(self, batch: PairBatch, stage: str) -> torch.Tensor:
-        """total = objective_loss (+ loss.hc_vs_rest_hinge_weight * hc_vs_rest_hinge)."""
+        """total = objective_loss (+ loss.hc_vs_rest_bce_weight * hc_vs_rest_bce)
+        (+ loss.hc_vs_rest_hinge_weight * hc_vs_rest_hinge)."""
         out1, out2 = self._embed_pair(batch)
         if self.cfg.training.objective == "simclr":
             objective_loss = self._contrastive_loss(out1, out2)
@@ -167,6 +180,11 @@ class SSLLightningModule(pl.LightningModule):
         self.log(f"{stage}/{self._loss_metric_name}", objective_loss, prog_bar=is_train, **log_kwargs)
 
         total = objective_loss
+        if self._use_aux_bce:
+            bce = self._classification_loss(out1, out2, batch)
+            total = total + self.cfg.loss.hc_vs_rest_bce_weight * bce
+            self.log(f"{stage}/hc_vs_rest_bce", bce, **log_kwargs)
+            self.log(f"{stage}/total_loss", total, **log_kwargs)
         if self._use_hinge:
             hinge = self._hinge_loss(out1, out2, batch, stage)
             total = total + self.cfg.loss.hc_vs_rest_hinge_weight * hinge

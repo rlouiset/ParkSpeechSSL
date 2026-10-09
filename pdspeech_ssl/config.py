@@ -92,6 +92,12 @@ class DataHParams:
 class LossHParams:
     temperature: float = 0.1
     gather_across_gpus: bool = True
+    # Auxiliary supervised HC-vs-rest (PD/MSA/PSP/DYS) BCE on a trainable linear cls_head over
+    # embd, added on top of training.objective=simclr -- the same loss as
+    # training.objective=hc_vs_rest_bce, but as a weighted term next to NT-Xent:
+    #   total = NT-Xent + hc_vs_rest_bce_weight * mean_over_views(BCE(logit, y)).
+    # 0 disables it. Exclusive with the hinge below (they would share cls_head).
+    hc_vs_rest_bce_weight: float = 0.0
     # Auxiliary supervised HC-vs-rest (PD/MSA/PSP/DYS) hinge loss on a trainable linear
     # cls_head over embd, added on top of training.objective=simclr:
     #   total = NT-Xent + hc_vs_rest_hinge_weight * mean_over_views(max(0, margin - y * logit)),
