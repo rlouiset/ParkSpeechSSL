@@ -145,6 +145,7 @@ class SSLEncoder(nn.Module):
 
         self.model_cfg = model_cfg
         self.sample_rate = sample_rate
+        self.frozen_wav2vec2 = encoder_cfg.trainable_mode == "frozen"
 
         self.wav2vec2, self.processor = _build_wav2vec2(encoder_cfg)
         wav2vec_dim = self.wav2vec2.config.hidden_size
@@ -181,6 +182,15 @@ class SSLEncoder(nn.Module):
             nn.ReLU(),
             nn.Linear(model_cfg.d_emb, model_cfg.proj_head_dim),
         )
+
+    def train(self, mode: bool = True) -> SSLEncoder:
+        # "frozen": keep wav2vec2 in eval mode even during training, so its
+        # dropout / LayerDrop / built-in SpecAugment masking stay off and it acts
+        # as a deterministic feature extractor.
+        super().train(mode)
+        if self.frozen_wav2vec2:
+            self.wav2vec2.eval()
+        return self
 
     def encode_frames(
         self,
