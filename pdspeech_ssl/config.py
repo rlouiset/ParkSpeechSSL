@@ -32,6 +32,7 @@ class ModelHParams:
     d_proj: Optional[int] = None  # projection dim before the BiLSTM temporal encoder (null = skip)
     blstm_layers: int = 2  # num_layers of the BiLSTM temporal encoder
     d_blstm: int = 128  # hidden size per direction of the BiLSTM temporal encoder
+    blstm_bidirectional: bool = True  # False = unidirectional (forward-only) LSTM
     d_emb: int = 32
     dropout: float = 0.2
     proj_head_dim: int = 32  # SimCLR-style projection head output dim (contrastive loss only, not the linear probe)

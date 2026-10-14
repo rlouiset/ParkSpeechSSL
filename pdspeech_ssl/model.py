@@ -40,7 +40,7 @@ class SelfAttentionPooling(nn.Module):
 
 
 class BiLSTMEncoder(nn.Module):
-    """Bidirectional LSTM over temporal features."""
+    """(Bi)LSTM over temporal features."""
 
     def __init__(
         self,
@@ -48,15 +48,17 @@ class BiLSTMEncoder(nn.Module):
         d_model: int = 128,
         num_layers: int = 2,
         dropout: float = 0.1,
+        bidirectional: bool = True,
     ):
         super().__init__()
+        self.out_dim = (2 if bidirectional else 1) * d_model
         self.dropout = nn.Dropout(dropout)
         self.blstm = nn.LSTM(
             input_size=input_dim,
             hidden_size=d_model,
             num_layers=num_layers,
             batch_first=True,
-            bidirectional=True,
+            bidirectional=bidirectional,
             dropout=dropout if num_layers > 1 else 0.0,
         )
 
@@ -81,7 +83,7 @@ class BiLSTMEncoder(nn.Module):
             batch_first=True,
             total_length=T,
         )
-        return x  # (B, T, 2*d_model)
+        return x  # (B, T, out_dim)
 
 
 def _build_wav2vec2(
@@ -166,14 +168,15 @@ class SSLEncoder(nn.Module):
             d_model=model_cfg.d_blstm,
             num_layers=model_cfg.blstm_layers,
             dropout=model_cfg.dropout,
+            bidirectional=model_cfg.blstm_bidirectional,
         )
 
         self.self_attention = SelfAttentionPooling(
-            2 * model_cfg.d_blstm
+            self.temporal_encoder.out_dim
         )
 
         self.embedding_projector = nn.Linear(
-            2 * model_cfg.d_blstm,
+            self.temporal_encoder.out_dim,
             model_cfg.d_emb,
         )
 
@@ -269,12 +272,12 @@ class SSLEncoder(nn.Module):
         X = self.temporal_encoder(
             X,
             lengths,
-        )  # (B, T, 2*d_blstm)
+        )  # (B, T, temporal_encoder.out_dim)
 
         H_speech = self.self_attention(
             X,
             lengths,
-        )  # (B, 2*d_blstm)
+        )  # (B, temporal_encoder.out_dim)
 
         embd = self.embedding_projector(
             H_speech
