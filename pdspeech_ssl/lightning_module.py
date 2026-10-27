@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import lightning.pytorch as pl
 
-from pdspeech_ssl.clinical_probe import run_clinical_probes
+from pdspeech_ssl.clinical_probe import run_clinical_probes, run_moca_probe
 from pdspeech_ssl.config import HParams
 from pdspeech_ssl.data import PairBatch, SegmentBatch
 from pdspeech_ssl.linear_probe import individual_level_metrics, train_and_eval_linear_probe
@@ -47,6 +47,9 @@ class SSLLightningModule(pl.LightningModule):
             raise ValueError("loss.hc_vs_rest_hinge_cosine and loss.hc_vs_rest_hinge_standardized are exclusive.")
         self.cfg = cfg
         self.model = SSLEncoder(cfg.encoder, cfg.model)
+        # last fit of the MoCA probe (rank 0 only), kept out of the module tree so DDP and the
+        # optimizer never see it -- saved into checkpoints by on_save_checkpoint
+        self.moca_probe: dict | None = None
         # cls_head only exists for the hc_vs_rest_bce objective or the auxiliary BCE / hinge --
         # keeping it out of the graph entirely otherwise (rather than just unused) avoids
         # padding DDP's unused-parameter bookkeeping and the checkpoint with dead weights.
@@ -275,10 +278,22 @@ class SSLLightningModule(pl.LightningModule):
             ind_keys = list(by_individual)
             ind_embd = np.stack([np.mean(by_individual[k], axis=0) for k in ind_keys])
             label_of = {ind.key: ind.label for ind in datamodule.train_individuals + datamodule.val_individuals}
+            ind_labels = [label_of[k] for k in ind_keys]
+            n_splits = self.cfg.training.clinical_probe_n_splits
             results = run_clinical_probes(
-                ind_keys, [label_of[k] for k in ind_keys], ind_embd, datamodule.metadata,
-                n_splits=self.cfg.training.clinical_probe_n_splits, seed=self.cfg.seed,
+                ind_keys, ind_labels, ind_embd, datamodule.metadata, n_splits=n_splits, seed=self.cfg.seed,
             )
+            moca_results, probe = run_moca_probe(
+                ind_keys, ind_labels, ind_embd, datamodule.metadata, n_splits=n_splits, seed=self.cfg.seed,
+                lr=self.cfg.training.moca_probe_lr,
+                epochs=self.cfg.training.moca_probe_epochs,
+                weight_decay=self.cfg.training.moca_probe_weight_decay,
+                device=self.device,
+            )
+            results.update(moca_results)
+            if probe is not None:
+                # input = an individual's mean segment embedding (the encoder's "embd"), output = MoCA points
+                self.moca_probe = {"state_dict": probe.state_dict(), "epoch": self.current_epoch, "metrics": moca_results}
         if self.trainer.world_size > 1:
             results = self.trainer.strategy.broadcast(results, src=0)
         for name, value in results.items():
@@ -293,6 +308,9 @@ class SSLLightningModule(pl.LightningModule):
         trainable = {name for name, p in self.named_parameters() if p.requires_grad}
         trainable |= {name for name, _ in self.named_buffers() if name.startswith("hinge_")}
         checkpoint["state_dict"] = {k: v for k, v in checkpoint["state_dict"].items() if k in trainable}
+        if self.moca_probe is not None:
+            # NOTE: fit at moca_probe["epoch"] (the last clinical-probe epoch), which can predate this checkpoint
+            checkpoint["moca_probe"] = self.moca_probe
 
     def configure_optimizers(self):
         params = [p for p in self.model.parameters() if p.requires_grad]

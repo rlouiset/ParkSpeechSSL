@@ -21,13 +21,17 @@ Sources:
   name + surname initial, matched against the patient folder names (some
   folders are surname-first, e.g. "LISCO G", so both orders are tried).
 - FredPrior: Demographics_age_sex.xlsx, keyed by the full sample id.
+- EWADB: SPEAKERS.TSV -- age, sex, MoCA, keyed by speaker code. Only the
+  Healthy/Parkinson/Alzheimer-Parkinson speakers preprocess_ewadb.py kept end
+  up in the output (the rest are dropped by the derivatives check below).
 CzechPD, SJTU, YeTalkBank, RAWDysPeech have none of these and are skipped.
 
-Columns: dataset, label, patient_hash, age, sex (M/F), updrs, hy, years_dx
-(empty = unknown). updrs is NeuroVoz's total UPDRS; KCL's speech sub-items are
+Columns: dataset, label, patient_hash, age, sex (M/F), updrs, hy, years_dx,
+moca (empty = unknown). updrs is NeuroVoz's total UPDRS; KCL's speech sub-items are
 not comparable to it and are not written.
 """
 
+import csv
 import hashlib
 import re
 import unicodedata
@@ -39,7 +43,7 @@ RAW = Path("/Users/robinlouiset/Documents/ParkSpeechData/raw")
 DERIVATIVES = Path("/Users/robinlouiset/Documents/ParkSpeechData/derivatives")
 OUT_PATH = DERIVATIVES / "metadata.csv"
 
-COLUMNS = ["dataset", "label", "patient_hash", "age", "sex", "updrs", "hy", "years_dx"]
+COLUMNS = ["dataset", "label", "patient_hash", "age", "sex", "updrs", "hy", "years_dx", "moca"]
 
 
 def md5_8(text: str) -> str:
@@ -158,6 +162,28 @@ def fredprior() -> list[dict]:
     return rows
 
 
+EWADB_ROOT = Path("/Users/robinlouiset/Documents/EWA-DB")
+# same mapping as preprocess_ewadb.GROUP_LABELS
+EWADB_LABELS = {"Parkinson": "PD", "Alzheimer-Parkinson": "PD", "Healthy": "HC"}
+
+
+def ewadb() -> list[dict]:
+    rows = []
+    with open(EWADB_ROOT / "SPEAKERS.TSV", newline="") as f:
+        for r in csv.DictReader(f, delimiter="\t"):
+            label = EWADB_LABELS.get(r["DIAGNOSIS"])
+            if label is None:
+                continue
+            # a few AGE cells hold a year (e.g. 2022), and MoCA is "X" when not administered
+            age = int(r["AGE"]) if r["AGE"].isdigit() and 15 <= int(r["AGE"]) <= 110 else None
+            rows.append({
+                "dataset": "EWADB", "label": label, "patient_hash": md5_8(f"{label}::{r['SPEAKER_CODE']}"),
+                "age": age, "sex": {"male": "M", "female": "F"}.get(r["SEX"]),
+                "moca": int(r["MOCA"]) if r["MOCA"].isdigit() else None,
+            })
+    return rows
+
+
 def existing_individuals() -> set[tuple[str, str, str]]:
     keys = set()
     for wav_path in DERIVATIVES.glob("*/*.wav"):
@@ -167,7 +193,7 @@ def existing_individuals() -> set[tuple[str, str, str]]:
 
 
 def main() -> None:
-    df = pd.DataFrame(neurovoz() + kcl() + ipvs() + fredprior(), columns=COLUMNS)
+    df = pd.DataFrame(neurovoz() + kcl() + ipvs() + fredprior() + ewadb(), columns=COLUMNS)
     df = df.drop_duplicates(["dataset", "label", "patient_hash"])
     existing = existing_individuals()
     found = df.apply(lambda r: (r["dataset"], r["label"], r["patient_hash"]) in existing, axis=1)
@@ -178,7 +204,7 @@ def main() -> None:
 
     print(f"wrote {len(df)} individuals to {OUT_PATH}")
     summary = df.groupby(["dataset", "label"]).agg(
-        n=("patient_hash", "size"), age=("age", "count"), sex=("sex", "count"), updrs=("updrs", "count"), hy=("hy", "count"),
+        n=("patient_hash", "size"), age=("age", "count"), sex=("sex", "count"), updrs=("updrs", "count"), hy=("hy", "count"), moca=("moca", "count"),
     )
     print(summary.to_string())
 

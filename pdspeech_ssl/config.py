@@ -178,6 +178,11 @@ class TrainingHParams:
     clinical_probe_n_splits: int = 5
     # segments averaged into each individual's embedding (random subset, fixed seed)
     clinical_probe_max_segments_per_individual: int = 8
+    # pooled PD+HC MoCA nn.Linear probe (clinical_probe.run_moca_probe), full-batch Adam on
+    # standardized individual embeddings; the last fit is stored in checkpoints as "moca_probe"
+    moca_probe_lr: float = 1e-2
+    moca_probe_epochs: int = 500
+    moca_probe_weight_decay: float = 1e-3
 
 
 @dataclass
