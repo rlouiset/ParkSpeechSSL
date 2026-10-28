@@ -314,7 +314,14 @@ class SSLLightningModule(pl.LightningModule):
 
     def configure_optimizers(self):
         params = [p for p in self.model.parameters() if p.requires_grad]
+        wav2vec2_lr = self.cfg.training.wav2vec2_lr
+        if wav2vec2_lr is not None:
+            wav2vec2_ids = {id(p) for p in self.model.wav2vec2.parameters()}
+            backbone = [p for p in params if id(p) in wav2vec2_ids]
+            params = [p for p in params if id(p) not in wav2vec2_ids]
         param_groups = [{"params": params}]
+        if wav2vec2_lr is not None and backbone:
+            param_groups.append({"params": backbone, "lr": wav2vec2_lr})
         if self.cls_head is not None:
             head_lr = self.cfg.loss.hc_vs_rest_hinge_head_lr
             if self._use_hinge and head_lr is not None:
@@ -324,6 +331,12 @@ class SSLLightningModule(pl.LightningModule):
         optimizer = torch.optim.AdamW(
             param_groups, lr=self.cfg.training.lr, weight_decay=self.cfg.training.weight_decay
         )
+        warmup_steps = self.cfg.training.warmup_steps
+        if self.cfg.encoder.trainable_mode != "full" or warmup_steps <= 0:
+            return {"optimizer": optimizer}
+        # scales every group's own lr (wav2vec2_lr, head lr, ...) by the same factor
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: min(1.0, (step + 1) / warmup_steps))
         return {
-            "optimizer": optimizer
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, "interval": "step", "frequency": 1},
         }

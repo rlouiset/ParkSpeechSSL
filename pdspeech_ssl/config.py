@@ -31,8 +31,8 @@ class EncoderHParams:
 class ModelHParams:
     d_proj: Optional[int] = None  # projection dim before the BiLSTM temporal encoder (null = skip)
     blstm_layers: int = 2  # num_layers of the BiLSTM temporal encoder
-    d_blstm: int = 128  # hidden size per direction of the BiLSTM temporal encoder
-    blstm_bidirectional: bool = True  # False = unidirectional (forward-only) LSTM
+    d_blstm: int = 64  # hidden size per direction of the BiLSTM temporal encoder
+    blstm_bidirectional: bool = False  # False = unidirectional (forward-only) LSTM
     d_emb: int = 32
     dropout: float = 0.2
     proj_head_dim: int = 32  # SimCLR-style projection head output dim (contrastive loss only, not the linear probe)
@@ -144,10 +144,15 @@ class TrainingHParams:
     objective: str = "simclr"
     batch_size_per_gpu: int = 16  # number of INDIVIDUALS per GPU per step (=> 2x that many views)
     lr: float = 3e-4  # bumped 3x from 1e-4 -- worth watching for instability now that trainable_mode="frozen"
+    # learning rate of the wav2vec2 weights (LoRA adapters in "lora" mode, everything in "full");
+    # null = lr. The heads (projector / BiLSTM / embedding / cls_head) keep lr.
+    wav2vec2_lr: Optional[float] = None
     weight_decay: float = 1e-2
     # ~370 train individuals / 4 GPUs / batch_size_per_gpu=16 => only ~5-6 optimizer
     # steps/epoch; 500 would take ~100 epochs just to finish warmup, so scale it down
     # to match this dataset's step-count regime (~20 epochs of warmup instead).
+    # Linear warmup from 0 to each param group's lr over warmup_steps optimizer steps, then
+    # constant. Only applied with encoder.trainable_mode="full" (0 disables it there too).
     warmup_steps: int = 100
     max_epochs: int = 200
     limit_train_batches: float = 1.0  # fraction (0-1) or absolute count of batches; useful for smoke tests
