@@ -25,7 +25,7 @@ def main(cfg: HParams) -> None:
     datamodule = PDSpeechDataModule(cfg.data, cfg.augment, cfg.training)
     module = SSLLightningModule(cfg)
 
-    wandb_logger = WandbLogger(project=cfg.wandb.project, name=cfg.wandb.name)
+    wandb_logger = WandbLogger(entity=cfg.wandb.entity, project=cfg.wandb.project, name=cfg.wandb.name)
 
     # relative "checkpoints" would land under $SLURM_SUBMIT_DIR ($HOME on Jean Zay --
     # small quota); default to $WORK there, fall back to a local relative dir otherwise.

@@ -192,6 +192,7 @@ class TrainingHParams:
 
 @dataclass
 class WandbHParams:
+    entity: Optional[str] = "louisetlab"  # team workspace the runs are logged/synced to (null = wandb default)
     project: str = "pdspeech_ssl"
     name: str = "wav2vec2xlsr_full_blstm_simclr"
     mode: str = "online"  # overridden to "offline" via WANDB_MODE env on clusters w/o internet
