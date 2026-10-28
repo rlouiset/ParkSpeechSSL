@@ -9,7 +9,7 @@ from pdspeech_ssl.clinical_probe import run_clinical_probes, run_moca_probe
 from pdspeech_ssl.config import HParams
 from pdspeech_ssl.data import PairBatch, SegmentBatch
 from pdspeech_ssl.linear_probe import individual_level_metrics, train_and_eval_linear_probe
-from pdspeech_ssl.losses import nt_xent_loss
+from pdspeech_ssl.losses import nt_xent_loss, within_class_variance_loss
 from pdspeech_ssl.model import SSLEncoder
 
 LABEL_TO_BINARY = {"HC": 0, "PD": 1}
@@ -71,6 +71,10 @@ class SSLLightningModule(pl.LightningModule):
     @property
     def _use_hinge(self) -> bool:
         return self.cfg.loss.hc_vs_rest_hinge_weight > 0
+
+    @property
+    def _use_within_class_var(self) -> bool:
+        return self.cfg.loss.within_class_var_weight > 0 or self.cfg.loss.within_class_cov_weight > 0
 
     @property
     def _hinge_uses_running_stats(self) -> bool:
@@ -169,9 +173,25 @@ class SSLLightningModule(pl.LightningModule):
                 self.log(f"{prefix}/cos_raw_{name}", cos_raw[mask].mean(), batch_size=n, **log_kwargs)
                 self.log(f"{prefix}/logit_{name}", logit[mask].mean(), batch_size=n, **log_kwargs)
 
+    def _within_class_var_loss(self, out1: dict, out2: dict, batch: PairBatch) -> tuple[torch.Tensor, ...]:
+        """(var, cov, std ratio) of losses.within_class_variance_loss over HC vs rest, averaged
+        over the two views. Gathered across GPUs like the contrastive loss: with 16 individuals
+        per GPU, a per-rank class can hold only a handful of samples, too few for a std."""
+        groups = _hc_vs_rest_targets(batch["labels"], self.device)
+        if self.cfg.loss.gather_across_gpus and self.trainer.world_size > 1:
+            groups = self.all_gather(groups).flatten(0, 1)
+        terms = []
+        for out in (out1, out2):
+            embd = out["embd"]
+            if self.cfg.loss.gather_across_gpus and self.trainer.world_size > 1:
+                embd = self.all_gather(embd, sync_grads=True).flatten(0, 1)
+            terms.append(within_class_variance_loss(embd, groups, self.cfg.loss.within_class_var_fraction ** 0.5))
+        return tuple(0.5 * (a + b) for a, b in zip(*terms))
+
     def _step(self, batch: PairBatch, stage: str) -> torch.Tensor:
         """total = objective_loss (+ loss.hc_vs_rest_bce_weight * hc_vs_rest_bce)
-        (+ loss.hc_vs_rest_hinge_weight * hc_vs_rest_hinge)."""
+        (+ loss.hc_vs_rest_hinge_weight * hc_vs_rest_hinge)
+        (+ loss.within_class_{var,cov}_weight * within_class_{var,cov})."""
         out1, out2 = self._embed_pair(batch)
         if self.cfg.training.objective == "simclr":
             objective_loss = self._contrastive_loss(out1, out2)
@@ -192,6 +212,14 @@ class SSLLightningModule(pl.LightningModule):
             hinge = self._hinge_loss(out1, out2, batch, stage)
             total = total + self.cfg.loss.hc_vs_rest_hinge_weight * hinge
             self.log(f"{stage}/hc_vs_rest_hinge", hinge, **log_kwargs)
+            self.log(f"{stage}/total_loss", total, **log_kwargs)
+        if self._use_within_class_var:
+            var, cov, std_ratio = self._within_class_var_loss(out1, out2, batch)
+            total = total + self.cfg.loss.within_class_var_weight * var + self.cfg.loss.within_class_cov_weight * cov
+            self.log(f"{stage}/within_class_var", var, **log_kwargs)
+            self.log(f"{stage}/within_class_cov", cov, **log_kwargs)
+            # mean std_within / std_total: 1 = classes overlap entirely, -> 0 = each class a point
+            self.log(f"{stage}/within_class_std_ratio", std_ratio, **log_kwargs)
             self.log(f"{stage}/total_loss", total, **log_kwargs)
         return total
 

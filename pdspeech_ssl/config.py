@@ -129,6 +129,18 @@ class LossHParams:
     # standardized hinges only use w's direction, which turns by ~lr * sqrt(d_emb) / ||w|| per
     # step: at lr=3e-4 and ~6 steps/epoch, a 90-degree turn takes ~80 epochs.
     hc_vs_rest_hinge_head_lr: Optional[float] = None
+    # VICReg-style within-class variance regularizer on embd (losses.within_class_variance_loss),
+    # added to whatever objective runs: keeps HC and rest (PD/MSA/PSP/DYS) from each collapsing
+    # to a point under BCE, so intra-class variation (severity, cognition) can survive.
+    #   total += within_class_var_weight * mean relu(sqrt(within_class_var_fraction) - std_within / std_total)
+    #          + within_class_cov_weight * within-class off-diagonal correlation^2
+    # std_total is the per-dimension std over the whole (all-GPU) batch, so the target is a
+    # fraction of each dimension's spread and can't be met by inflating ||embd||. Computed on
+    # each view separately. within_class_var_fraction: minimum share of each dimension's
+    # variance that must stay within-class (0.2 -> std ratio >= 0.447). 0 disables each term.
+    within_class_var_weight: float = 0.0
+    within_class_var_fraction: float = 0.2
+    within_class_cov_weight: float = 0.0
 
 
 @dataclass
